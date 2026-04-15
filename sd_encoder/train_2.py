@@ -1,0 +1,236 @@
+
+import torch, os
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from tqdm import tqdm
+from transformers import CLIPTokenizer, CLIPModel, get_cosine_schedule_with_warmup
+import pandas as pd
+import random
+import torch.nn.functional as F
+from models import TextImageEncoder
+from encoder import LoRAEncoder
+
+from dataset import LoRADataset,lora_collate_fn
+# from diffsynth.core import load_state_dict
+import math
+import argparse
+import os,json
+# from diffsynth.utils.lora import GeneralLoRALoader
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+class LoRARetrieverTrainingModel(torch.nn.Module):
+    def __init__(self,task='clipemb',L=1,dtype=torch.float, embed_dim=768, encoder_intermediate_size=2560, num_encoder_layers=4, num_probes=4):
+        super().__init__()
+        if task == 'clipemb':
+            self.clip_encoder = TextImageEncoder().to(dtype=dtype)
+        else:
+            self.clip_encoder = None
+        self.lora_encoder = LoRAEncoder(L=L, embed_dim=embed_dim, encoder_intermediate_size=encoder_intermediate_size, num_encoder_layers=num_encoder_layers, num_probes=num_probes)
+
+        if self.clip_encoder is not None:
+            for param in self.clip_encoder.parameters():
+                param.requires_grad = False
+
+        # self.lora_loader = GeneralLoRALoader()
+        self.lambda_img = 0.5
+        self.lambda_text = 1
+        self.task = task
+
+    def to(self, *args, **kwargs):
+        device, dtype, non_blocking, convert_to_format = torch._C._nn._parse_to(*args, **kwargs)
+        if device is not None:
+            self.device = device
+        if dtype is not None:
+            self.torch_dtype = dtype
+        super().to(*args, **kwargs)
+        return self
+        
+    def forward(self, batch):
+        lora_paths = batch['model_file']
+        lora_text = batch['lora_text']
+        diff_vecs = batch['diff_vec'] # [B,768]
+        loras = batch['lora']
+        txt_embs = batch['txtemb']
+
+
+        
+        # diff_vecs = self.diff_proj(diff_vecs)
+        # prompt_embs = txt_embs + diff_vecs # [B, 768]
+
+        lora_embs=[]
+
+        for lora in loras:
+            lora = {k: v.to(txt_embs.device).to(txt_embs.dtype) for k, v in lora.items()}
+            lora_emb = self.lora_encoder(lora)
+            lora_embs.append(lora_emb)
+        lora_embs = torch.cat(lora_embs, dim=0) # [B, 768]
+
+
+        # text and diff_vec
+        if self.task == 'clipemb':
+            txt_embs = self.clip_encoder.encoding_text(lora_text) # [B, 768]
+        else:
+            txt_embs = txt_embs.to(dtype=lora_embs.dtype,device=lora_embs.device)
+
+        diff_vecs = diff_vecs.to(dtype=txt_embs.dtype,device=txt_embs.device) # [B, 768]
+
+        # loss = self.contrastive_loss(lora_embs, prompt_embs)
+        loss_text = self.contrastive_loss(lora_embs, txt_embs)
+        loss_img = self.contrastive_loss(lora_embs, diff_vecs)
+        loss = self.lambda_text * loss_text + self.lambda_img * loss_img
+        return {
+            "loss": loss,
+            "loss_text": loss_text.detach(),
+            "loss_img": loss_img.detach(),
+        }
+
+
+    def contrastive_loss(self,fuse_emb, text_emb, temperature=0.07):
+        # 1) 归一化
+        fuse_emb = F.normalize(fuse_emb, p=2, dim=-1)
+        text_emb = F.normalize(text_emb, p=2, dim=-1)
+
+        # 2) 计算相似度矩阵 [B, B]
+        logits = fuse_emb @ text_emb.t() / temperature
+
+        # 3) 构造标签：第 i 个 image 对应第 i 个 text
+        labels = torch.arange(fuse_emb.size(0), device=fuse_emb.device)
+
+        # 4) 双向对比损失
+        loss_i2t = F.cross_entropy(logits, labels)
+        loss_t2i = F.cross_entropy(logits.t(), labels)
+
+        loss = (loss_i2t + loss_t2i) / 2
+        return loss
+
+
+    def trainable_modules(self):
+        return self.lora_encoder.parameters()
+
+
+
+class ModelLogger:
+    def __init__(self, output_path, remove_prefix_in_ckpt=None):
+        self.output_path = output_path
+        self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
+        
+    
+    def on_step_end(self, loss):
+        pass
+    
+    
+    def on_epoch_end(self, accelerator, model, epoch_id):
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            state_dict = accelerator.unwrap_model(model).lora_encoder.state_dict()
+            os.makedirs(self.output_path, exist_ok=True)
+            path = os.path.join(self.output_path, f"lora_encoder-{epoch_id}.safetensors")
+            accelerator.save(state_dict, path, safe_serialization=True)
+
+            # state_dict = accelerator.unwrap_model(model).text_encoder.state_dict()
+            # os.makedirs(self.output_path, exist_ok=True)
+            # path = os.path.join(self.output_path, f"epoch-text_encoder-{epoch_id}.safetensors")
+            # accelerator.save(state_dict, path, safe_serialization=True)
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--metadata_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_2.jsonl')
+    parser.add_argument("--emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/Diffimage-SD-emb')
+    parser.add_argument("--txt_emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/train_set_txtemb_10k')
+    parser.add_argument("--output_dir", type=str, required=False, default="models/lora_encode")
+    parser.add_argument("--info", type=str, required=False, default=", 不用prompt训练，直接用lora emb 和diff_vec做对比学习")
+
+    # lora encoder config
+    parser.add_argument("--L", type=int, required=False, default=1)
+    parser.add_argument("--embed_dim", type=int, required=False, default=768)
+    parser.add_argument("--encoder_intermediate_size", type=int, required=False, default=2560)
+    parser.add_argument("--num_encoder_layers", type=int, required=False, default=6)
+    parser.add_argument("--num_probes", type=int, required=False, default=8)
+
+    # training setting
+    parser.add_argument("--task", type=str, default="clipemb") # clipemb ｜qwenemb  使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
+    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--num_epochs", type=int, default=150)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--num_workers", type=int, default=4)
+
+
+    parser.add_argument("--warmup_ratio", type=float, default=0.1)
+    parser.add_argument("--save_steps", type=int, default=1000)
+    parser.add_argument("--logging_steps", type=int, default=2)
+
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    accelerator = Accelerator(kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)])
+    device = accelerator.device
+
+    dataset = LoRADataset(metadata_path=args.metadata_path, emb_path=args.emb_path, txt_emb_path=args.txt_emb_path)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=args.batch_size, num_workers=args.num_workers,collate_fn=lora_collate_fn)
+
+    model = LoRARetrieverTrainingModel(task=args.task, L=args.L, embed_dim=args.embed_dim, encoder_intermediate_size=args.encoder_intermediate_size, num_encoder_layers=args.num_encoder_layers, num_probes=args.num_probes)
+
+    optimizer = torch.optim.AdamW(model.trainable_modules(), lr=args.lr, weight_decay=args.weight_decay,)
+
+    
+
+    train_set_name = args.metadata_path.split('/')[-1].split('.')[0]
+    model_save_path = f"models/lora_encoder/{args.task}/{train_set_name}"
+    os.makedirs(model_save_path, exist_ok=True)
+    model_ids = len(os.listdir(model_save_path))
+    if accelerator.is_main_process:
+        p = f"{model_save_path}/{model_ids}"
+        os.makedirs(p, exist_ok=True)
+        with open(f'{p}/config.json', 'w', encoding='utf-8') as f:
+            json.dump(args.__dict__, f)
+    model_logger = ModelLogger(f'{model_save_path}/{model_ids}', remove_prefix_in_ckpt="lora_encoder.")
+
+    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+    num_update_steps_per_epoch = math.ceil(len(dataloader))
+    max_train_steps = args.num_epochs * num_update_steps_per_epoch
+    num_warmup_steps = int(args.warmup_ratio * max_train_steps)
+
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=max_train_steps,
+    )
+    lr_scheduler = accelerator.prepare(lr_scheduler)
+
+    global_step = 0
+    for epoch in range(args.num_epochs):
+        for step, batch in enumerate(dataloader):
+            # print(f'data:{data}')
+            with accelerator.accumulate(model):
+                # 
+                outputs = model(batch)
+                loss = outputs["loss"]
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+            global_step += 1
+            if global_step % args.logging_steps == 0:
+                accelerator.print(
+                    f"Epoch [{epoch+1}/{args.num_epochs}] "
+                    f"Step [{global_step}/{max_train_steps}] "
+                    f"Loss: {outputs['loss'].item():.4f} "
+                    f"Text: {outputs['loss_text'].item():.4f} "
+                    f"Img: {outputs['loss_img'].item():.4f} "
+                    f"LR: {lr_scheduler.get_last_lr()[0]:.8f}"
+                )
+        if epoch % 2 == 0 or epoch==args.num_epochs-1:
+            model_logger.on_epoch_end(accelerator, model, epoch) 
+        # model_logger.on_epoch_end(accelerator, model, epoch)
+
+
+if __name__ == "__main__":
+    main()
+    
+
+# nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7 --main_process_port=29502 train_2.py > zlog/train_sd_lora_encoder_dataset2_1e4_bs24.log 2>&1 &

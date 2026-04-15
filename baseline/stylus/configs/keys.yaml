@@ -1,0 +1,8 @@
+OPENAI_API_KEY: '34343'
+OPENAI_ORG_ID: '34343'
+OPENAI_PROJECT_ID: '34334'
+CIVIT_API_KEY: '34343'
+# Optional: To poll our Pinecone DB
+PINECONE_KEY: Null
+# Optional, for reranker ablation.
+COHERE_API_KEY: Null
