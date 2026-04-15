@@ -33,6 +33,8 @@ source_files/
 source_files_0/
 train_set_txtemb_10k/
 zlog/
+SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl
+SD_adapter_metadata/exist_file_adapters.jsonl
 # 忽略所有 .zip, .tar, .gz 压缩包
 *.zip
 *.tar.gz
