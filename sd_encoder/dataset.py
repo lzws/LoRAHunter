@@ -168,6 +168,7 @@ class LoRADataset(torch.utils.data.Dataset):
         txt_emb_path=''
     ):
         self.base_path = base_path
+        self.task = task
 
         with open(metadata_path, 'r', encoding='utf-8') as f:
             self.datas = [json.loads(line) for line in f.readlines()]
@@ -200,11 +201,13 @@ class LoRADataset(torch.utils.data.Dataset):
             diff_vec = diff_vec.squeeze(0)
 
         # load qwenvl emb
-        txtemb = self.emb_saver.load_txtemb(model_id)
-        if txtemb.dim() == 2 and txtemb.size(0) == 1:
-            txtemb = txtemb.squeeze(0)
+        if self.task == 'qwenemb':
+            txtemb = self.emb_saver.load_txtemb(model_id)
+            if txtemb.dim() == 2 and txtemb.size(0) == 1:
+                txtemb = txtemb.squeeze(0)
+        else:
+            txtemb = torch.zeros(768)
         
-
         return {
             "model_file": full_model_path,
             "lora": lora,           # dict[str, tensor]

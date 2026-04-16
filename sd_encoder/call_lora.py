@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4'
 import time
 import torch
 from torch.utils.data import DataLoader
@@ -12,7 +12,7 @@ import torch.multiprocessing as mp
 
 
 
-from models import TextImageEncoder
+from models import TextImageEncoder, QwenVLEncoder
 from encoder import LoRAEncoder
 from diffusers.loaders import StableDiffusionLoraLoaderMixin
 from dataset import default_lora_patterns
@@ -102,7 +102,7 @@ def build_lora_index_worker(
     print(f"[Rank {rank}] dataset size: {len(dataset)}")
     print(f"[Rank {rank}] loading encoder from: {encoder_path}")
 
-    lora_encoder = LoRAEncoder(L=1,num_encoder_layers=8,num_probes=8)
+    lora_encoder = LoRAEncoder(L=1,num_encoder_layers=12,num_probes=16,embed_dim=2048,encoder_intermediate_size=3072)
     lora_encoder.load_state_dict(load_file(encoder_path))
     lora_encoder = lora_encoder.to(device=device, dtype=dtype)
     lora_encoder.eval()
@@ -262,6 +262,7 @@ class LoRARetriever:
         metadata_path,
         device="cuda",
         alpha=0.7,
+        task='clipemb'
     ):
         """
         alpha:
@@ -272,8 +273,14 @@ class LoRARetriever:
         self.alpha = alpha
 
         # dense encoder
-        self.clip_encoder = TextImageEncoder().to(device)
-        self.clip_encoder.eval()
+        if task == 'clipemb':
+            dtype = torch.float
+            self.clip_encoder = TextImageEncoder(device=device).to(device)
+            self.clip_encoder.eval()
+        else:
+            dtype = torch.bfloat16
+            self.clip_encoder = QwenVLEncoder(device=device)
+            self.clip_encoder.eval()
 
         # load dense index
         index_data = torch.load(index_path, map_location="cpu")
@@ -283,16 +290,18 @@ class LoRARetriever:
         print(f"[Index] loaded dense index: {self.lora_embs.shape}")
 
         # normalize once
-        self.lora_embs = F.normalize(self.lora_embs, dim=-1).to(device)
+        # , dtype=dtype
+        self.lora_embs = F.normalize(self.lora_embs, dim=-1).to(device=device)
+
 
         # load metadata
         with open(metadata_path, "r", encoding="utf-8") as f:
             all_datas = [json.loads(line) for line in f]
 
-        metadata_map = {}
+        self.metadata_map = {}
         for data in all_datas:
             model_file = data.get("model_file", "")
-            metadata_map[model_file] = data
+            self.metadata_map[model_file] = data
 
         # build bm25 corpus aligned with dense index order
         self.documents = []
@@ -300,7 +309,7 @@ class LoRARetriever:
 
         missing_count = 0
         for model_file in self.model_files:
-            data = metadata_map.get(model_file, None)
+            data = self.metadata_map.get(model_file, None)
             if data is None:
                 doc = ""
                 missing_count += 1
@@ -338,7 +347,7 @@ class LoRARetriever:
     @torch.no_grad()
     def retrieve_dense_scores(self, query_text):
         text_emb = self.clip_encoder.encoding_text([query_text])   # [1, D]
-        text_emb = F.normalize(text_emb, dim=-1)
+        text_emb = F.normalize(text_emb, dim=-1).to(self.lora_embs.dtype)
         scores = (text_emb @ self.lora_embs.t())[0]   # [N]
         return scores.detach().cpu()
 
@@ -421,7 +430,7 @@ def call_lora(
     device="cuda",
     mode="dense",   # dense / bm25 / hybrid
     top_k=10,
-    alpha=0.3,
+    alpha=0.7,
 ):
     retriever = LoRARetriever(
         index_path=index_path,
@@ -458,30 +467,71 @@ def call_lora(
     print(f"[Done] saved results to {output_path}")
 
 
+def call_lora_one(
+    query=" ",
+    index_path="/shark/zhiwen/LoRAHunter/sd_encoder/lora_index_qwenemb_rwamse_all.pt",
+    metadata_path="../SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
+    device="cuda:4",
+    mode="hybrid",   # dense / bm25 / hybrid
+    top_k=10,
+    alpha=0.5,
+    task="qwenemb"
+):
+    retriever = LoRARetriever(
+        index_path=index_path,
+        metadata_path=metadata_path,
+        device=device,
+        alpha=alpha,
+        task=task
+    )
+
+    topk = retriever.retrieve(
+        query_text=query,
+        top_k=top_k,
+        mode=mode,
+    )
+
+    metadata_map = retriever.metadata_map
+
+    for i, item in enumerate(topk):
+        print(f"{i}: {item['model_file']}, score: {item['score']}, dense_score_norm: {item['dense_score_norm']}, bm25_score_norm: {item['bm25_score_norm']}")
+        data = metadata_map[item["model_file"]]
+        print(f"  title: {data['title']}, description: {data['llm_description']}")
+        print("\n\n")
+
+
+
+    
 
 
 if __name__ == "__main__":
     # build_lora_index_multi_gpu(
     #     lora_pool_metadata_file="/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
     #     lora_base_path="/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1",
-    #     encoder_path="/shark/zhiwen/LoRAHunter/sd_encoder/models/lora_encoder/clipemb/train_sd_lora_dataset_2/7/lora_encoder-108.safetensors",
-    #     save_path="lora_index_clipemb-7_all.pt",
+    #     encoder_path="/shark/zhiwen/LoRAHunter/sd_encoder/models/lora_encoder/qwenemb/train_sd_lora_dataset_2/9/lora_encoder-84.safetensors",
+    #     save_path="lora_index_qwenemb_rwamse_all.pt",
     #     batch_size=16,
     #     num_workers=8,
     #     dtype=torch.float,
-    #     num_gpus=1,
+    #     num_gpus=4,
     #     save_dir="lora_index_shards",
     # )
 
-    call_lora(
-        index_path="lora_index_clipemb-7_all.pt",
-        metadata_path="../SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
-        test_data_path="../test_data/retrieval_testdata_250_extract.jsonl",
-        output_path="test_data/250_clipemb-7_all_res.jsonl",
-        device="cuda",
-        mode="hybrid",   # dense / bm25 / hybrid
-        top_k=40,
-        alpha=0.4,
-    )
+    # call_lora(
+    #     index_path="lora_index_clipemb-7_all.pt",
+    #     metadata_path="../SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
+    #     test_data_path="../test_data/retrieval_testdata_250_extract.jsonl",
+    #     output_path="test_data/250_clipemb-7_all_res.jsonl",
+    #     device="cuda",
+    #     mode="hybrid",   # dense / bm25 / hybrid
+    #     top_k=40,
+    #     alpha=0.4,
+    # )
+    index_path = "/shark/zhiwen/LoRAHunter/sd_encoder/lora_index_clipemb-7_all.pt"
+    task = 'clipemb'
+    query = "A koi fish in watercolor style"
+    query = "A koi fish"
+    # query = "watercolor style"
+    call_lora_one(query=query, index_path=index_path, task=task)
 
 # nohup python call_lora.py > build_lora_index.log 2>&1 &

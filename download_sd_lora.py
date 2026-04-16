@@ -1,6 +1,8 @@
 
 #验证 ModelScope token
 from modelscope.hub.api import HubApi
+
+
 api = HubApi()
 api.login('ms-b99bca69-c5d6-48b9-aa6d-58cb49ed57ac')
 
@@ -92,8 +94,8 @@ def organize_pth_files(src, dst):
                 print(f"⚠️ 跳过: {filename} (文件名长度不足4位)")
 
 def move_file():
-    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen/Diffimage-SD-emb-qwen"
-    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen"
+    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb_2"
+    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb"
     dir_1_list = os.listdir(emb_dir)
     for dir_1 in dir_1_list:
         dir_2_list = os.listdir(os.path.join(emb_dir, dir_1))
@@ -106,7 +108,78 @@ def move_file():
                 shutil.move(os.path.join(emb_dir, dir_1, dir_2, emb_file), target_path)
     print("✅ 移动完成！")
 
+def copy_file():
+    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen"
+    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec"
+    dir_1_list = os.listdir(emb_dir)
+    for dir_1 in dir_1_list:
+        dir_2_list = os.listdir(os.path.join(emb_dir, dir_1))
+        for dir_2 in dir_2_list:
+            emb_files = os.listdir(os.path.join(emb_dir, dir_1, dir_2))
+            os.makedirs(os.path.join(tar_dir, dir_1, dir_2), exist_ok=True)
+            for emb_file in emb_files:
+                target_path = os.path.join(tar_dir, dir_1, dir_2, emb_file)
+                if emb_file.endswith("_diffvec.pth") and not os.path.exists(target_path):
+                    target_path = os.path.join(tar_dir, dir_1, dir_2, emb_file)
+                    shutil.copy(os.path.join(emb_dir, dir_1, dir_2, emb_file), target_path)
+    print("✅ 复制完成！")
+
+
+def count_file():
+    emb_dir = "/shark/zhiwen/LoRAHunter/train_set_txtemb_10k"
+    # tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec"
+    nums = 0
+    dir_1_list = os.listdir(emb_dir)
+    for dir_1 in dir_1_list:
+        dir_2_list = os.listdir(os.path.join(emb_dir, dir_1))
+        for dir_2 in dir_2_list:
+            emb_files = os.listdir(os.path.join(emb_dir, dir_1, dir_2))
+            for emb_file in emb_files:
+                if emb_file.endswith(".pth"):
+                    nums += 1
+    print(f"{emb_dir} has {nums} files")
+    print("✅ 复制完成！")
+
+def file_size(file_path):
+    try:
+        # 获取文件大小（字节）
+        size = os.path.getsize(file_path)
+        print(f"文件大小: {size} 字节")
+    except FileNotFoundError:
+        print("文件不存在")
+
+
+import torch
+def inspect_pth(file_path):
+    print(f"\n--- 检查文件: {file_path} ---")
+    print(f"文件大小: {os.path.getsize(file_path)} 字节")
+    
+    # 加载文件 (map_location='cpu' 防止显存不足)
+    data = torch.load(file_path, map_location='cpu')
+    
+    # 1. 如果保存的是字典 (常见情况)
+    if isinstance(data, dict):
+        print("类型: 字典 (dict)")
+        print("包含的键:", data.keys())
+        for k, v in data.items():
+            if hasattr(v, 'shape'):
+                print(f"  - 键 '{k}': 形状 {v.shape}, 类型 {v.dtype}")
+            else:
+                print(f"  - 键 '{k}': 值 {v} (非张量)")
+    
+    # 2. 如果保存的是张量
+    elif isinstance(data, torch.Tensor):
+        print(f"类型: 张量 (Tensor)")
+        print(f"形状: {data.shape}")
+        print(f"类型: {data.dtype}")
+        
+    # 3. 如果保存的是整个模型对象
+    else:
+        print(f"类型: {type(data)}")
+        print("注意: 这看起来像是一个被序列化的 Python 对象，而不是单纯的张量或字典。")
+
 if __name__ == "__main__":
+    from sd_encoder.dataset import EmbSaver
     # --- 配置区域 ---
     source_folder = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb"  # 存放原始 .pth 文件的文件夹
     target_root = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb"      # 重新组织后的根目录
@@ -114,9 +187,26 @@ if __name__ == "__main__":
     # print("\n所有文件整理完毕！")
 
     # 使用示例
-    unzip_fix_encoding("SDv15-LoRA-DiffVec/Diffimage-SD-9000-9400.zip", "./DiffImage_SD_1")
+    # unzip_fix_encoding("SDv15-LoRA-DiffVec/Diffimage-SD-emb-2-2400-6400-8800-10000.zip", "./DiffImage_SD-emb_2")
     # model_dir = snapshot_download('lzwecnu/SDv15-LoRA-DiffVec',local_dir='SDv15-LoRA-DiffVec')
-    # move_file()
+
+    # count_file()
+    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
+
+    file_size("/shark/zhiwen/LoRAHunter/train_set_txtemb_10k/10/00/100005.pth")
+    file_size("/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec/10/00/100005_diffvec.pth")
+
+    # text_emb = emb_saver.load_txtemb(100005)
+    # print(text_emb.shape, text_emb.dtype)
+    # vec_emb = emb_saver.load_vec(100005)
+    # print(vec_emb.shape, vec_emb.dtype)
+
+    inspect_pth("/shark/zhiwen/LoRAHunter/train_set_txtemb_10k/10/00/100005.pth")
+    inspect_pth("/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec/10/00/100005_diffvec.pth")
+    
+
+
+
 
 
 

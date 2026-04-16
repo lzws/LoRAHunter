@@ -43,19 +43,57 @@ class LoRALayerBlock(torch.nn.Module):
 
         return out
 
+class LoRALayerBlock2(torch.nn.Module):
+    def __init__(self, L, dim_in, num_probes=4, full_name=''):
+        super().__init__()
+        self.x = torch.nn.Parameter(torch.randn(num_probes, dim_in) * 0.02)
+        self.out_proj = torch.nn.Linear(num_probes, L)
+        self.full_name = full_name
+
+        self.pre_norm = nn.LayerNorm(num_probes)
+        self.mlp = nn.Sequential(
+            nn.Linear(num_probes, num_probes * 4),
+            nn.GELU(),
+            nn.Linear(num_probes * 4, num_probes),
+        )
+
+
+    def forward(self, lora_A, lora_B):
+        if lora_A.dim() == 4:
+            lora_A = lora_A[:, :, 0, 0]
+            lora_B = lora_B[:, :, 0, 0]
+
+        # [P, d_in] @ [d_in, r] -> [P, r]
+        # [P, r] @ [r, d_out] -> [P, d_out]
+        x = self.x @ lora_A.T @ lora_B.T   # [P, d_out]
+
+        # project probe dimension P -> L
+        x = x.transpose(0, 1)              # [d_out, P]
+        x = x + self.mlp(self.pre_norm(x))
+        x = self.out_proj(x)               # [d_out, L]
+        out = x.transpose(0, 1).unsqueeze(0)   # [1, L, d_out]
+
+        return out
+
+
+block_map = {
+    "block": LoRALayerBlock,
+    "block2": LoRALayerBlock2
+}
 
 class LoRAEmbedder(torch.nn.Module):
-    def __init__(self, lora_patterns=None, L=1, out_dim=2048, num_probes=4):
+    def __init__(self, lora_patterns=None, L=1, out_dim=2048, num_probes=4,block_type="block"):
         super().__init__()
         if lora_patterns is None:
             lora_patterns = self.default_lora_patterns()
         self.L = L
         self.num_probes = num_probes
+        self.block_type = block_type
             
         model_dict = {}
         for lora_pattern in lora_patterns:
             name, dim = lora_pattern["name"], lora_pattern["dim"][0]
-            model_dict[name.replace(".", "___")] = LoRALayerBlock(L, dim, num_probes,name)
+            model_dict[name.replace(".", "___")] = block_map[block_type](L, dim, num_probes,name)
         self.model_dict = torch.nn.ModuleDict(model_dict)
         
         proj_dict = {}
@@ -155,17 +193,20 @@ class LoRAEmbedder(torch.nn.Module):
 
 
 class LoRAEncoder(torch.nn.Module):
-    def __init__(self, embed_dim=768, max_position_embeddings=150, num_encoder_layers=4, encoder_intermediate_size=2560, L=1, num_probes=4):
+    def __init__(self, embed_dim=768, max_position_embeddings=150, num_encoder_layers=4, encoder_intermediate_size=2560, L=1, num_probes=4, 
+                    block_type="block", head_mode="single", pooling="cls", out_dim=None, text_out_dim=None, img_out_dim=None):
         super().__init__()
         max_position_embeddings *= L
+        self.head_mode = head_mode
+        self.pooling = pooling
 
         self.cls_token = torch.nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
         
         # Embedder
-        self.embedder = LoRAEmbedder(L=L, out_dim=embed_dim, num_probes=num_probes)
+        self.embedder = LoRAEmbedder(L=L, out_dim=embed_dim, num_probes=num_probes, block_type=block_type)
 
         # position_embeds (This is a fixed tensor)
-        self.position_embeds = torch.nn.Parameter(torch.zeros(1, max_position_embeddings, embed_dim))
+        self.position_embeds = torch.nn.Parameter(torch.zeros(1, max_position_embeddings * L, embed_dim))
 
         # encoders
         self.encoders = torch.nn.ModuleList([CLIPEncoderLayer(embed_dim, encoder_intermediate_size) for _ in range(num_encoder_layers)])
@@ -175,7 +216,31 @@ class LoRAEncoder(torch.nn.Module):
 
         # final_layer_norm
         self.final_layer_norm = torch.nn.LayerNorm(embed_dim)
-        self.out_proj = torch.nn.Linear(embed_dim, embed_dim)
+        if pooling == "cls_mean":
+            self.pool_proj = nn.Sequential(
+                nn.LayerNorm(embed_dim * 2),
+                nn.Linear(embed_dim * 2, embed_dim),
+            )
+        else:
+            self.pool_proj = nn.Identity()
+        
+        if head_mode == "single":
+            final_out_dim = out_dim if out_dim is not None else embed_dim
+            self.out_proj = torch.nn.Linear(embed_dim, final_out_dim)
+        elif head_mode == "dual":
+            text_out_dim = text_out_dim if text_out_dim is not None else embed_dim
+            img_out_dim = img_out_dim if img_out_dim is not None else embed_dim
+
+            self.text_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, text_out_dim),
+            )
+            self.img_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, img_out_dim),
+            )
+        else:
+            raise ValueError(f"head_mode {head_mode} is not supported")
 
     def attention_mask(self, length):
         mask = torch.empty(length, length)
@@ -183,17 +248,42 @@ class LoRAEncoder(torch.nn.Module):
         mask.triu_(1)
         return mask
 
-    def forward(self, lora):
-        embeds = self.embedder(lora) + self.position_embeds
+    def encode_tokens(self, lora):
+        embeds = self.embedder(lora) 
+        embeds = embeds + self.position_embeds[:, :embeds.size(1), :]
         # attn_mask = self.attn_mask.to(device=embeds.device, dtype=embeds.dtype)
         cls_ = self.cls_token.expand(embeds.size(0), -1, -1)
         embeds = torch.cat([cls_, embeds], dim=1)
         for encoder_id, encoder in enumerate(self.encoders):
             embeds = encoder(embeds, attn_mask=None)
         embeds = self.final_layer_norm(embeds)
-        out = self.out_proj(embeds[:, 0])
-        return out
+        return embeds
+    
+    def pool_features(self, embeds):
+        if self.pooling == 'cls':
+            h = embeds[:, 0]
+        elif self.pooling == "cls_mean":
+            cls_feat = embeds[:, 0]
+            mean_feat = embeds[:, 1:].mean(dim=1)
+            h = self.pool_proj(torch.cat([cls_feat, mean_feat], dim=-1))
+        else:
+            raise ValueError(f"pooling {self.pooling} is not supported")
+        
+        return h
 
+    def encode_trunk(self, lora):
+        embeds = self.encode_tokens(lora)
+        h = self.pool_features(embeds)
+        return h
+
+    def forward(self, lora):
+        h = self.encode_trunk(lora)
+        if self.head_mode == "single":
+            return self.out_proj(h)
+        elif self.head_mode == "dual":
+            z_text = self.text_head(h)
+            z_img = self.img_head(h)
+            return z_text, z_img
 
 
 

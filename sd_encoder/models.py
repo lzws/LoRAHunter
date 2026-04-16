@@ -6,6 +6,8 @@ import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 
+from qwen3_vl_embedding import Qwen3VLEmbedder
+
 def low_version_attention(query, key, value, attn_bias=None):
     scale = 1 / query.shape[-1] ** 0.5
     query = query * scale
@@ -127,9 +129,9 @@ class CLIPEncoderLayer(torch.nn.Module):
 
 # "openai/clip-vit-large-patch14"
 class TextImageEncoder(torch.nn.Module):
-    def __init__(self, model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14", dtype=torch.float):
+    def __init__(self, model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14", dtype=torch.float, device="cuda"):
         super().__init__()
-        # self.device = device
+        self.device = device
         self.dtype = dtype
         # self.model, self.preprocess = clip.load('ViT-L/14@336px', download_root=model_name, device=device)
         print(f"load clip model from: {model_name}")
@@ -153,7 +155,35 @@ class TextImageEncoder(torch.nn.Module):
         return text_features.pooler_output #[1, 768]
 
 
-class LoRAEncoder(torch.nn.Module):
-    def __init__(self, model_name="", device='cuda:7'):
+class QwenVLEncoder(torch.nn.Module):
+    def __init__(self, model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/Qwen/Qwen3-VL-Embedding-2B", device='cuda'):
         super().__init__()
         self.device = device
+        self.model = Qwen3VLEmbedder(model_name_or_path=model_name,device = torch.device(device))
+        print(f"load model from: {model_name}")
+
+    @torch.no_grad()
+    def encoding_text(self, text):
+        if isinstance(text, str):
+            text = [text]
+
+        queries = [{"text": t} for t in text]
+        text_features = self.model.process(queries) # [N, 2048]
+        return text_features
+    
+    @torch.no_grad()
+    def encoding_image(self, image_path):
+        if isinstance(image_path, str):
+            image_path = [image_path]
+
+        queries = [{"image": i} for i in image_path]
+        image_features = self.model.process(queries) # [N, 2048]
+        return image_features
+
+    @torch.no_grad()
+    def encoding_images(self, inputs):
+        image_features = self.model.get_embeddings(inputs) # [N, 2048]
+        return image_features
+
+
+

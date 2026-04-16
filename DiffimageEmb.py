@@ -561,9 +561,9 @@ def process_one_model(model_id):
 
 def make_diff_vec_parallel(max_workers=8):
 
-    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
+    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb', root_image_path='Diffimage-SD')
 
-    metadata_path = 'SD_adapter_metadata/train_lora_10k.jsonl'
+    metadata_path = 'SD_adapter_metadata/train_lora_10k_2.jsonl'
     with open(metadata_path, 'r') as f:
         datas = [json.loads(line) for line in f.readlines()]
     print(f'load {len(datas)} datas')
@@ -607,9 +607,13 @@ def make_diff_vec_parallel(max_workers=8):
     print(f"done. success={success}, failed={failed}")
 
 
+    
+    
+
 if __name__ == '__main__':
-    main(4)
+    # main(4)
     # make_train_text_embs(metadapath="SD_adapter_metadata/train_lora_10k.jsonl", batch_size=32)
+    make_diff_vec_parallel()
 
     
 

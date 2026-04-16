@@ -34,7 +34,10 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
         lora_encoder_path=None,
         loss_type = 'contrastive_loss',
         lambda_img = 0.1,
-        lambda_text = 0.1
+        lambda_text = 0.1,
+        block_type='block',
+        head_mode='single',
+        pooling='cls'
     ):
         super().__init__()
         self.task = task
@@ -49,10 +52,14 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
             embed_dim=embed_dim,
             encoder_intermediate_size=encoder_intermediate_size,
             num_encoder_layers=num_encoder_layers,
-            num_probes=num_probes
-        )
+            num_probes=num_probes,
+            block_type=block_type,
+            head_mode=head_mode,
+            pooling=pooling
+        ).to(dtype=dtype)
         if lora_encoder_path is not None:
             self.lora_encoder.load_state_dict(load_file(lora_encoder_path))
+            self.lora_encoder = self.lora_encoder.to(dtype=dtype)
             print("Load lora encoder from", lora_encoder_path)
 
         self.logit_scale = torch.nn.Parameter(
@@ -93,9 +100,12 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
         txt_embs = batch['txtemb']
 
         # 1) encode lora
-        lora_embs = []
+        # lora_embs = []
         target_device = self.device
         target_dtype = self.dtype
+
+        lora_text_embs = []
+        lora_img_embs = []
 
         for lora in loras:
             lora = {
@@ -103,23 +113,33 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
                 for k, v in lora.items()
             }
             lora_emb = self.lora_encoder(lora)  # [1, D]
-            lora_embs.append(lora_emb)
+            if isinstance(lora_emb, tuple):
+                lora_text_emb, lora_img_emb = lora_emb
+                lora_text_embs.append(lora_text_emb)
+                lora_img_embs.append(lora_img_emb)
+            else:
+                lora_text_embs.append(lora_emb)
+                lora_img_embs.append(lora_emb)
 
-        lora_embs = torch.cat(lora_embs, dim=0)  # [B, D]
+        lora_text_embs = torch.cat(lora_text_embs, dim=0)  # [B, D]
+        lora_img_embs = torch.cat(lora_img_embs, dim=0) # [B, D]
+
 
         # 2) text emb
         if self.task == 'clipemb':
             with torch.no_grad():
                 txt_embs = self.clip_encoder.encoding_text(lora_text)  # [B, D]
         else:
-            txt_embs = txt_embs.to(dtype=lora_embs.dtype, device=lora_embs.device)
+            txt_embs = txt_embs.to(dtype=target_dtype, device=target_device)
 
 
 
-        diff_vecs = diff_vecs.to(dtype=lora_embs.dtype, device=lora_embs.device)
+        diff_vecs = diff_vecs.to(dtype=target_dtype, device=target_device)
 
         return {
-            "lora_embs": lora_embs,
+            # "lora_embs": lora_embs,
+            "lora_text_embs": lora_text_embs,
+            "lora_img_embs": lora_img_embs,
             "txt_embs": txt_embs,
             "diff_vecs": diff_vecs,
         }
@@ -166,20 +186,20 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
         loss = (loss_a2b + loss_b2a) / 2
         return loss
 
-    def compute_loss(self, lora_embs, txt_embs, diff_vecs):
+    def compute_loss(self, lora_text_embs, lora_img_embs, txt_embs, diff_vecs):
         # loss_text = self.contrastive_loss(lora_embs, txt_embs)
         # loss_img = self.contrastive_loss(lora_embs, diff_vecs)
 
-        loss_text = self.loss_map[self.loss_type](lora_embs, txt_embs)
-        loss_img = self.loss_map[self.loss_type](lora_embs, diff_vecs)
+        loss_text = self.loss_map[self.loss_type](lora_text_embs, txt_embs)
+        loss_img = self.loss_map[self.loss_type](lora_img_embs, diff_vecs)
 
         loss = self.lambda_text * loss_text + self.lambda_img * loss_img
 
         # ---------------------------
         # cosine alignment
         # ---------------------------
-        cos_text = F.cosine_similarity(lora_embs, txt_embs, dim=-1).mean()
-        cos_img = F.cosine_similarity(lora_embs, diff_vecs, dim=-1).mean()
+        cos_text = F.cosine_similarity(lora_text_embs, txt_embs, dim=-1).mean()
+        cos_img = F.cosine_similarity(lora_img_embs, diff_vecs, dim=-1).mean()
         cos_teacher = F.cosine_similarity(txt_embs, diff_vecs, dim=-1).mean()
 
         # ---------------------------
@@ -242,18 +262,22 @@ def parse_args():
     parser.add_argument("--info", type=str, required=False, default=", 不用prompt训练，直接用lora emb 和diff_vec做对比学习, 8卡全局batch对比学习")
 
     # lora encoder config
-    parser.add_argument("--L", type=int, required=False, default=1)
+    parser.add_argument("--L", type=int, required=False, default=2)
     parser.add_argument("--embed_dim", type=int, required=False, default=2048)
     parser.add_argument("--encoder_intermediate_size", type=int, required=False, default=3072)
-    parser.add_argument("--num_encoder_layers", type=int, required=False, default=12)
+    parser.add_argument("--num_encoder_layers", type=int, required=False, default=8)
     parser.add_argument("--num_probes", type=int, required=False, default=16)
+    parser.add_argument("--block_type", type=str, required=False, default="block2") # block | block2
+    parser.add_argument("--head_mode", type=str, required=False, default="dual")  # single | dual
+    parser.add_argument("--pooling", type=str, required=False, default="cls_mean")   # cls | cls_mean
     parser.add_argument("--lora_encoder_path", required=False, default=None)
 
     # training setting
-    parser.add_argument("--task", type=str, default="qwenemb") # clipemb ｜qwenemb  使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
+    parser.add_argument("--task", type=str, default="qwenemb") # clipemb ｜ qwenemb  使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
+    parser.add_argument("--torch_dtype", required=False, default="bf16") # bf16 | float
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=400)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--loss_type", type=str, default="cosine_smoothl1_loss") # contrastive_loss | mse_loss | mse_raw_loss | smooth_l1_regression_loss | cosine_smoothl1_loss
@@ -292,8 +316,13 @@ def main():
         pin_memory=True,
         persistent_workers=True if args.num_workers > 0 else False,
     )
+    if args.torch_dtype == "bf16":
+        dtype = torch.bfloat16
+    else :
+        dtype = torch.float
 
     model = LoRARetrieverTrainingModel(
+        dtype=dtype,
         task=args.task,
         L=args.L,
         embed_dim=args.embed_dim,
@@ -303,7 +332,10 @@ def main():
         lora_encoder_path=args.lora_encoder_path,
         loss_type=args.loss_type,
         lambda_img=args.lambda_img,
-        lambda_text=args.lambda_text
+        lambda_text=args.lambda_text,
+        block_type=args.block_type,
+        head_mode=args.head_mode,
+        pooling=args.pooling,
     )
 
     # optimizer = torch.optim.AdamW(
@@ -327,7 +359,7 @@ def main():
         )
 
     train_set_name = args.metadata_path.split('/')[-1].split('.')[0]
-    model_save_path = f"models/lora_encoder/{args.task}/{train_set_name}"
+    model_save_path = f"models/lora_encoder/{args.task}/{train_set_name}/{args.loss_type}"
     os.makedirs(model_save_path, exist_ok=True)
     model_ids = len(os.listdir(model_save_path))
 
@@ -355,6 +387,9 @@ def main():
     if accelerator.is_main_process:
         print("=" * 80)
         print("[Training Config]")
+        print(f"metadata_path: {args.metadata_path}")
+        print(f"emb_path: {args.emb_path}")
+        print(f"txt_emb_path: {args.txt_emb_path}")
         print(f"Dataset size: {len(dataset)}")
         print(f"Per-device batch size: {args.batch_size}")
         print(f"Num processes (GPUs): {accelerator.num_processes}")
@@ -369,6 +404,10 @@ def main():
         print(f"loss_type: {args.loss_type}")
         print(f"lambda_img: {args.lambda_img}")
         print(f"lambda_text: {args.lambda_text}")
+        print(f"block_type: {args.block_type}")
+        print(f"torch_dtype: {dtype}")
+        print(f"head_mode: {args.head_mode}")
+        print(f"pooling: {args.pooling}")
         print(f"base lr: {args.lr}")
         print(f"optimizer lr (init): {optimizer.param_groups[0]['lr']}")
         print(f"save path: {model_save_path}/{model_ids}")
@@ -381,19 +420,24 @@ def main():
                 # 1) local encode
                 encoded = model.module.encode_batch(batch) if hasattr(model, "module") else model.encode_batch(batch)
 
-                local_lora_embs = encoded["lora_embs"]
+                # local_lora_embs = encoded["lora_embs"]
+                local_lora_text_embs = encoded["lora_text_embs"]
+                local_lora_img_embs = encoded["lora_img_embs"]
                 local_txt_embs = encoded["txt_embs"]
                 local_diff_vecs = encoded["diff_vecs"]
                 
                 # 2) global gather with grad
-                global_lora_embs = gather_with_grad(local_lora_embs)
+                # global_lora_embs = gather_with_grad(local_lora_embs)
+                global_lora_text_embs = gather_with_grad(local_lora_text_embs)
+                global_lora_img_embs = gather_with_grad(local_lora_img_embs)
                 global_txt_embs = gather_with_grad(local_txt_embs)
                 global_diff_vecs = gather_with_grad(local_diff_vecs)
 
                 # 3) compute global contrastive loss
                 raw_model = model.module if hasattr(model, "module") else model
                 outputs = raw_model.compute_loss(
-                    global_lora_embs,
+                    global_lora_text_embs,
+                    global_lora_img_embs,
                     global_txt_embs,
                     global_diff_vecs,
                 )
@@ -428,4 +472,4 @@ def main():
 if __name__ == "__main__":
     main()
     
-# nohup accelerate launch --num_processes 4 --gpu_ids 0,1,2,3 --main_process_port=29502 train_3.py > zlog/qwenemb_dataset2_cosine_smoothl1_loss_2.log 2>&1 &
+# nohup accelerate launch --num_processes 4 --gpu_ids 0,1,2,3 --main_process_port=29501 train_3.py > zlog/train_qwenemb/qwenemb_dataset2_cosine_smoothl1_loss_dual_block2_bf16.log 2>&1 &
