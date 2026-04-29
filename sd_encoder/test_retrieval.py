@@ -109,70 +109,6 @@ def build_lora_index_no_tqdm(
     print(f"embedding shape: {all_embs.shape}")
 
 
-def build_lora_index_clip(
-    lora_pool_metadata_file,
-    save_path="lora_index_clip.pt",
-    batch_size=64,
-    device="cuda",
-):
-    # load metadata
-    with open(lora_pool_metadata_file, "r", encoding="utf-8") as f:
-        datas = [json.loads(line) for line in f]
-
-    print(f"[CLIP Index] loaded {len(datas)} items from {lora_pool_metadata_file}")
-
-    # load text encoder
-    clip_encoder = TextImageEncoder().to(device=device)
-    clip_encoder.eval()
-
-    model_files = []
-    texts = []
-
-    # build text for each LoRA
-    for data in datas:
-        model_file = data.get("model_file", "")
-        title = data.get("title", "")
-        description = data.get("llm_description", "")
-        tags = data.get("tags", [])
-
-        if isinstance(tags, list):
-            tag_str = ", ".join(tags)
-        else:
-            tag_str = str(tags)
-
-        text = (
-            f"Convert Stable Diffusion finetuned adapter description into an embedding for search: "
-            f"Title: {title}; Description: {description}; Tags: {tag_str};"
-        )
-
-        model_files.append(model_file)
-        # texts.append(text)
-
-    all_embs = []
-
-    # batch encode
-    with torch.no_grad():
-        for start in tqdm(range(0, len(texts), batch_size), desc="Building CLIP text index"):
-            end = min(start + batch_size, len(texts))
-            batch_texts = texts[start:end]
-
-            emb = clip_encoder.encoding_text(batch_texts)   # [B, D]
-            emb = F.normalize(emb, dim=-1)
-            all_embs.append(emb.cpu())
-
-    all_embs = torch.cat(all_embs, dim=0)   # [N, D]
-
-    # save
-    torch.save({
-        "model_files": model_files,
-        "embeddings": all_embs,
-    }, save_path)
-
-    print(f"[CLIP Index] saved to {save_path}")
-    print(f"[CLIP Index] num items: {len(model_files)}")
-    print(f"[CLIP Index] embedding shape: {all_embs.shape}")
-
-
 
 
 
@@ -418,7 +354,7 @@ def llm_call(lora_list,prompt,keyword):
 
 def llm_rerank(test_data_path="",lora_metadata_path='/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl'):
 
-    black_list = ['255148','245088','130197','47837']
+    black_list = ['255148','245088','130197','47837','128327','257194','234309']
 
     with open(test_data_path, 'r') as f:
         test_datas = [json.loads(line) for line in f.readlines()]
@@ -429,16 +365,16 @@ def llm_rerank(test_data_path="",lora_metadata_path='/shark/zhiwen/LoRAHunter/SD
 
     lora_metadatas_map = {one['model_file']: one for one in lora_metadatas}
 
-    output_path = test_data_path.replace('.jsonl', '_rerank.jsonl')
+    output_path = test_data_path.replace('.jsonl', '_llm-rerank.jsonl')
 
-    for data in test_datas[20:]:
+    for data in test_datas[:]:
         prompt = data['prompt']
         retrieval_results = data['retrieval_results']
         data['rerank_results'] = {}
         for keyword, top5 in retrieval_results.items():
             print(keyword)
             lora_list_info=""
-            for one in top5:
+            for one in top5[:20]:
                 model_id = one['model_file']
                 if model_id in black_list:
                     continue
@@ -468,9 +404,9 @@ if __name__ == "__main__":
     device='cuda:4'
     index_path = 'lora_index_dataset2_all.pt'
     test_data_path = '../test_data/retrieval_testdata_250_extract.jsonl'
-    output_path = '../test_data/retrieval_testdata_250_calllora.jsonl'
-    call_lora(index_path,test_data_path,output_path,device)
-    # llm_rerank(test_data_path=output_path)
+    output_path = 'test_data/data_500_qwenemb_4-28.jsonl'
+    # call_lora(index_path,test_data_path,output_path,device)
+    llm_rerank(test_data_path=output_path)
 
     # retriever = LoRARetriever(index_path='lora_index.pt', device="cuda")
     # query = "Cyberpunk style"

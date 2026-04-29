@@ -9,6 +9,7 @@ root_image_path = 'DiffImage_SD'
 from torch.utils.data import Dataset, DataLoader
 
 from encoder import QwenVLEncoder
+import torch.nn.functional as F
 
 # "openai/clip-vit-large-patch14"
 class TextImageEncoder(torch.nn.Module):
@@ -257,7 +258,7 @@ class ImageDataset(Dataset):
 
 
 
-def get_image_embs(model_id='Qwen', text_image_encoder=None, emb_saver=None, batch_size=64, num_workers=8):
+def get_image_embs(model_id='Qwen', text_image_encoder=None, emb_saver=None, task='clipemb', batch_size=64, num_workers=8):
     """
     高性能图片 Embedding 提取函数
     使用 DataLoader 多进程加载 + 批量推理加速
@@ -356,6 +357,11 @@ def get_image_embs(model_id='Qwen', text_image_encoder=None, emb_saver=None, bat
         
         return processed_inputs, names
 
+    collate_fn_mapping = {
+        'clipemb': collate_fn,
+        'qwenemb': collate_fn_qwenvl
+    }
+
     # 5. 创建 DataLoader (核心加速引擎)
     dataset = ImageDataset(all_image_paths, all_image_names)
     
@@ -367,7 +373,7 @@ def get_image_embs(model_id='Qwen', text_image_encoder=None, emb_saver=None, bat
         pin_memory=True,          # 关键：加速 CPU->GPU 传输
         prefetch_factor=2,        # 每个 worker 预先加载 2 个 batch
         drop_last=False,
-        collate_fn=collate_fn
+        collate_fn=collate_fn_mapping['task']
     )
 
     print(f"开始批量推理 (Batch Size: {batch_size}, Workers: {num_workers})...")
@@ -377,14 +383,14 @@ def get_image_embs(model_id='Qwen', text_image_encoder=None, emb_saver=None, bat
     
     for step, (inputs, names) in enumerate(dataloader):
         if inputs is None: continue
-        
-        # 异步传输数据到 GPU
-        inputs = inputs.to(device, non_blocking=True)
+
         
         with torch.no_grad():
-            # 批量推理
-            image_features = text_image_encoder.model.get_image_features(**inputs).pooler_output
-            # image_features = text_image_encoder.encoding_images(inputs)
+            if task == 'clipemb':
+                inputs = inputs.to(device, non_blocking=True)
+                image_features = text_image_encoder.model.get_image_features(**inputs).pooler_output
+            else:
+                image_features = text_image_encoder.encoding_images(inputs)
             # 获取 pooler_output (即最终的 embedding 向量)
             embeddings = image_features.cpu() # 移回 CPU 以便存入字典 [N, 2048]
 
@@ -454,19 +460,20 @@ def main(num=0):
     # 8000 - 9200
     # 9400 - 10000
     # num = 
+    task = 'qwenemb'
     device = f'cuda:{num}'
     start = 5100 + num * 100
     end = start + 100
-    start, end = 5100, 5500
+    start, end = 5300, 5500
     print(f'start: {start}, end: {end}')
 
-    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb_2', root_image_path='Diffimage-SD')
+    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
 
     # 
-    text_image_encoder = TextImageEncoder(device=device).to(device=device)
-    print('text_image_encoder loaded')
+    # text_image_encoder = TextImageEncoder(device=device).to(device=device)
+    # print('text_image_encoder loaded')
 
-    # text_image_encoder = QwenVLEncoder(device=device)
+    text_image_encoder = QwenVLEncoder(device=device)
 
     # base_embs = emb_saver.load_emb_dict('SDv1-5')
 
@@ -477,7 +484,7 @@ def main(num=0):
     print(f'load {len(datas)} datas')
 
     n = 0
-    for data in datas[:]:
+    for data in datas[start:end]:
         if n % 100 == 0:
             print(f'n: {n}')
         n+=1
@@ -486,8 +493,9 @@ def main(num=0):
         vec_path = emb_saver.get_vec_path(model_id)
 
         if os.path.exists(val_path) or not os.path.exists(f'{root_image_path}/{model_id}'):
+            print(f"{model_id} exists")
             continue
-        get_image_embs(model_id = model_id, text_image_encoder=text_image_encoder, emb_saver=emb_saver)
+        get_image_embs(model_id = model_id, text_image_encoder=text_image_encoder, emb_saver=emb_saver, task=task)
 
         # if os.path.exists(val_path) and not os.path.exists(vec_path): 
         #     # print(f"############### encoding {model_id} ##################")
@@ -561,7 +569,7 @@ def process_one_model(model_id):
 
 def make_diff_vec_parallel(max_workers=8):
 
-    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb', root_image_path='Diffimage-SD')
+    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
 
     metadata_path = 'SD_adapter_metadata/train_lora_10k_2.jsonl'
     with open(metadata_path, 'r') as f:
@@ -607,14 +615,67 @@ def make_diff_vec_parallel(max_workers=8):
     print(f"done. success={success}, failed={failed}")
 
 
-    
+
+def make_carlos_difftxt_emb(device="cuda", save_path="carlos_difftxt_qwenemb.pt", task='qwenemb'):
+    from CARLoS_prompt import prompts_for_indexing
+
+    prompts = prompts_for_indexing()
+    categories = [
+        'Portraits', 'Landscapes', 'Artistic_Styles', 'Conceptual_Arts',
+        'Animals', 'Fashion', 'Vehicles', 'Food', 'Cinematic', 'Logos'
+    ]
+
+    all_prompts = []
+    for c_tag in categories:
+        sub_categories = prompts[c_tag]
+        for k, v in sub_categories.items():
+            for prompt in v:
+                all_prompts.append(prompt)
+
+    # 去重
+    all_prompts = list(dict.fromkeys(all_prompts))
+    print(f"[Prompt] num prompts after dedup: {len(all_prompts)}")
+
+    # encoder
+    if task == "clipemb":
+        encoder = TextImageEncoder(device=device).to(device)
+        encoder.eval()
+    else:
+        encoder = QwenVLEncoder(device=device)
+        encoder.eval()
+
+    batch_size = 64
+    all_embs = []
+
+    for i in range(0, len(all_prompts), batch_size):
+        batch_prompts = all_prompts[i:i+batch_size]
+        embs = encoder.encoding_text(batch_prompts)   # [B, D]
+        embs = F.normalize(embs, dim=-1)
+        all_embs.append(embs.detach().cpu())
+
+        print(f"[Prompt] encoded {i + len(batch_prompts)}/{len(all_prompts)}")
+
+    prompt_embs = torch.cat(all_embs, dim=0)   # [M, D]
+    prompt_emb_mean = F.normalize(prompt_embs.mean(dim=0, keepdim=True), dim=-1)   # [1, D]
+
+    save_data = {
+        "prompts": all_prompts,
+        "prompt_embeddings": prompt_embs,       # [M, D]
+        "prompt_embedding_mean": prompt_emb_mean,  # [1, D]
+    }
+    torch.save(save_data, save_path)
+    print(f"[Done] saved prompt embeddings to {save_path}")
+
+
+
     
 
 if __name__ == '__main__':
-    # main(4)
+    # main(1)
     # make_train_text_embs(metadapath="SD_adapter_metadata/train_lora_10k.jsonl", batch_size=32)
-    make_diff_vec_parallel()
-
+    # make_diff_vec_parallel()
+    make_carlos_difftxt_emb()
+    
     
 
 

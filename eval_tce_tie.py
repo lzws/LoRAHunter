@@ -1,4 +1,5 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from collections import defaultdict
 from typing import List, Dict, Tuple
 
@@ -92,8 +93,8 @@ def group_images_by_prompt_id(image_dir: str) -> Dict[str, List[str]]:
             continue
 
         prompt_id = parts[0]
-        if int(prompt_id) < 75:
-            continue
+        # if int(prompt_id) < 75:
+        #     continue
         full_path = os.path.join(image_dir, fname)
         groups[prompt_id].append(full_path)
 
@@ -369,26 +370,33 @@ def compute_grouped_tce_tie(
 if __name__ == "__main__":
     image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs/250_clipemb-7_all_res_combinations_reank"
     image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs/sdv15_250_clipemb-7_all_res_combinations_reank"
+    image_dir1 = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/hunter_data_500_qwenemb_4-28_reank_beam/realistic"
+    image_dir2 = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/sdv15_retrieval_testdata_500/realistic"
+    image_dir3 = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/hunter_data_500_qwenemb_5-199_2-0_diverse/realistic"
+    image_dirs = [image_dir2, image_dir3]
+    for image_dir in image_dirs[:1]:
+        print(f"eval: {image_dir}")
+        results = compute_grouped_tce_tie(
+            image_dir=image_dir,
+            clip_model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14",
+            batch_size=64,
+            truncate_mode="topk",     # "topk" or "mass"
+            truncate_topk=5,          # 每个 prompt 只有 5 张图，这里设 3 比较合理
+            truncate_mass=0.95,
+            temperature=0.1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
 
-    results = compute_grouped_tce_tie(
-        image_dir=image_dir,
-        clip_model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14",
-        batch_size=32,
-        truncate_mode="topk",     # "topk" or "mass"
-        truncate_topk=3,          # 每个 prompt 只有 5 张图，这里设 3 比较合理
-        truncate_mass=0.95,
-        temperature=0.1,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
+        print("\n===== Grouped TCE/TIE Results =====")
+        print(f"eval: {image_dir}")
+        print("TCE mean:", results["TCE"]["mean_entropy"])
+        print("TCE std :", results["TCE"]["std_entropy"])
+        print("TIE mean:", results["TIE"]["mean_entropy"])
+        print("TIE std :", results["TIE"]["std_entropy"])
 
-    print("\n===== Grouped TCE/TIE Results =====")
-    print("TCE mean:", results["TCE"]["mean_entropy"])
-    print("TCE std :", results["TCE"]["std_entropy"])
-    print("TIE mean:", results["TIE"]["mean_entropy"])
-    print("TIE std :", results["TIE"]["std_entropy"])
-
-    # 看某个 prompt 的结果
-    if "0" in results["TCE"]["per_prompt"]:
-        print("\nPrompt 0 TCE:", results["TCE"]["per_prompt"]["0"])
-    if "0" in results["TIE"]["per_prompt"]:
-        print("Prompt 0 TIE:", results["TIE"]["per_prompt"]["0"])
+        # 看某个 prompt 的结果
+        if "0" in results["TCE"]["per_prompt"]:
+            print("\nPrompt 0 TCE:", results["TCE"]["per_prompt"]["0"])
+        if "0" in results["TIE"]["per_prompt"]:
+            print("Prompt 0 TIE:", results["TIE"]["per_prompt"]["0"])
+        print('\n')

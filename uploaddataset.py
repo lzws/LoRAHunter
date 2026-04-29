@@ -25,17 +25,17 @@ def zip_folder_detailed(folder_path, output_zip_path):
 
 
 def upload_file(file_path,repo_path):
-    YOUR_ACCESS_TOKEN = 'ms-b99bca69-c5d6-48b9-aa6d-58cb49ed57ac'
+    YOUR_ACCESS_TOKEN = 'ms-f2fdbf7c-5f13-4f11-ab7c-45ba458c0077'
     api = HubApi()
     api.login(YOUR_ACCESS_TOKEN)
     owner_name = 'lzwecnu'
-    model_name = 'LoRAHunter_Training_data'
+    model_name = 'LoRAHunter_Training_data_2'
     # filename = file_path.split('/')[-1]
     api.upload_file(
         path_or_fileobj=file_path,
         path_in_repo=repo_path,
         repo_id=f"{owner_name}/{model_name}",
-        repo_type = 'dataset',
+        repo_type = 'model',
         commit_message='upload dataset',
     )
 
@@ -44,8 +44,8 @@ if __name__ == "__main__":
     # 使用示例
     save_path = "/shark/zhiwen/LoRAHunter/training_dataset"
 
-    # folder_path = "/shark/zhiwen/LoRAHunter/train_set_txtemb_10k"
-    # output_zip_path = f"{save_path}/{folder_path.split('/')[-1]}.zip"
+    folder_path = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec"
+    output_zip_path = f"{save_path}/{folder_path.split('/')[-1]}.zip"
     # zip_folder_detailed(folder_path, output_zip_path)
 
     file_list = os.listdir(save_path)

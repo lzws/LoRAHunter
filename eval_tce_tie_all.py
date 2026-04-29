@@ -27,8 +27,8 @@ def list_image_paths(image_dir: str, exts=(".png", ".jpg", ".jpeg", ".webp", ".b
                 p_id = int(fname.split('_')[1])
             else :
                 p_id = int(fname.split('_')[0])
-            if p_id < 75:
-                continue
+            # if p_id < 75:
+            #     continue
             image_paths.append(os.path.join(image_dir, fname))
     image_paths.sort()
     return image_paths
@@ -146,10 +146,10 @@ class InceptionFeatureExtractor:
         model = models.inception_v3(
             weights=models.Inception_V3_Weights.DEFAULT,
             aux_logits=True,
-        )
+        ).to("cuda")
         model.fc = torch.nn.Identity()
         model.eval()
-        self.model = model.to(self.device)
+        self.model = model.to("cuda")
 
         self.transform = transforms.Compose([
             transforms.Resize((299, 299)),
@@ -343,15 +343,16 @@ def compute_tce_tie_from_folder(
 if __name__ == "__main__":
     image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs/250_clipemb-7_all_res_combinations_reank"
     image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs/sdv15_250_clipemb-7_all_res_combinations_reank"
-    image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs/testdata_250_totalpool_stylus"
-
+    image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/sdv15_retrieval_testdata_500/realistic"
+    # image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/stylus_testdata_500_totalpool_stylus/realistic"
+    # image_dir = "/shark/zhiwen/LoRAHunter/sd_encoder/outputs2/hunter_data_500_qwenemb_4-28_reank_beam/realistic"
     results = compute_tce_tie_from_folder(
         image_dir=image_dir,
         clip_model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14",
         batch_size=32,
-        num_clusters=20,
+        num_clusters=30,
         truncate_mode="topk",   # "topk" or "mass"
-        truncate_topk=10,
+        truncate_topk=15,
         truncate_mass=0.95,
         device="cuda",
     )

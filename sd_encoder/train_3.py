@@ -26,7 +26,7 @@ class LoRARetrieverTrainingModel(torch.nn.Module):
         self,
         task='clipemb',
         L=1,
-        dtype=torch.float,
+        dtype=torch.bfloat16,
         embed_dim=768,
         encoder_intermediate_size=2560,
         num_encoder_layers=4,
@@ -255,7 +255,7 @@ class ModelLogger:
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--metadata_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_2.jsonl')
+    parser.add_argument("--metadata_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_20k.jsonl')
     parser.add_argument("--emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen')
     parser.add_argument("--txt_emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/train_set_txtemb_10k')
     parser.add_argument("--output_dir", type=str, required=False, default="models/lora_encode")
@@ -263,10 +263,10 @@ def parse_args():
 
     # lora encoder config
     parser.add_argument("--L", type=int, required=False, default=2)
-    parser.add_argument("--embed_dim", type=int, required=False, default=2048)
-    parser.add_argument("--encoder_intermediate_size", type=int, required=False, default=3072)
-    parser.add_argument("--num_encoder_layers", type=int, required=False, default=8)
-    parser.add_argument("--num_probes", type=int, required=False, default=16)
+    parser.add_argument("--embed_dim", type=int, required=False, default=2048) # 768 | 2048
+    parser.add_argument("--encoder_intermediate_size", type=int, required=False, default=3072) # 2560 | 3072
+    parser.add_argument("--num_encoder_layers", type=int, required=False, default=8) # 8 | 12
+    parser.add_argument("--num_probes", type=int, required=False, default=16) # 8 | 16
     parser.add_argument("--block_type", type=str, required=False, default="block2") # block | block2
     parser.add_argument("--head_mode", type=str, required=False, default="dual")  # single | dual
     parser.add_argument("--pooling", type=str, required=False, default="cls_mean")   # cls | cls_mean
@@ -276,16 +276,16 @@ def parse_args():
     parser.add_argument("--task", type=str, default="qwenemb") # clipemb ｜ qwenemb  使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
     parser.add_argument("--torch_dtype", required=False, default="bf16") # bf16 | float
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--num_epochs", type=int, default=400)
+    parser.add_argument("--num_epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--loss_type", type=str, default="cosine_smoothl1_loss") # contrastive_loss | mse_loss | mse_raw_loss | smooth_l1_regression_loss | cosine_smoothl1_loss
+    parser.add_argument("--loss_type", type=str, default="contrastive_loss") # contrastive_loss | mse_loss | mse_raw_loss | smooth_l1_regression_loss | cosine_smoothl1_loss
     parser.add_argument("--lambda_img", type=float, default=1)
     parser.add_argument("--lambda_text", type=float, default=1)
 
 
-    parser.add_argument("--warmup_ratio", type=float, default=0.01)
+    parser.add_argument("--warmup_ratio", type=float, default=0.005)
     parser.add_argument("--save_steps", type=int, default=1000)
     parser.add_argument("--logging_steps", type=int, default=2)
 
@@ -318,7 +318,7 @@ def main():
     )
     if args.torch_dtype == "bf16":
         dtype = torch.bfloat16
-    else :
+    else:
         dtype = torch.float
 
     model = LoRARetrieverTrainingModel(
@@ -425,22 +425,31 @@ def main():
                 local_lora_img_embs = encoded["lora_img_embs"]
                 local_txt_embs = encoded["txt_embs"]
                 local_diff_vecs = encoded["diff_vecs"]
-                
-                # 2) global gather with grad
-                # global_lora_embs = gather_with_grad(local_lora_embs)
-                global_lora_text_embs = gather_with_grad(local_lora_text_embs)
-                global_lora_img_embs = gather_with_grad(local_lora_img_embs)
-                global_txt_embs = gather_with_grad(local_txt_embs)
-                global_diff_vecs = gather_with_grad(local_diff_vecs)
 
-                # 3) compute global contrastive loss
                 raw_model = model.module if hasattr(model, "module") else model
-                outputs = raw_model.compute_loss(
-                    global_lora_text_embs,
-                    global_lora_img_embs,
-                    global_txt_embs,
-                    global_diff_vecs,
-                )
+                if args.loss_type == 'contrastive_loss':
+
+                    # 2) global gather with grad
+                    # global_lora_embs = gather_with_grad(local_lora_embs)
+                    global_lora_text_embs = gather_with_grad(local_lora_text_embs)
+                    global_lora_img_embs = gather_with_grad(local_lora_img_embs)
+                    global_txt_embs = gather_with_grad(local_txt_embs)
+                    global_diff_vecs = gather_with_grad(local_diff_vecs)
+
+                    # 3) compute global contrastive loss
+                    outputs = raw_model.compute_loss(
+                        global_lora_text_embs,
+                        global_lora_img_embs,
+                        global_txt_embs,
+                        global_diff_vecs,
+                    )
+                else:
+                    outputs = raw_model.compute_loss(
+                        local_lora_text_embs,
+                        local_lora_img_embs,
+                        local_txt_embs,
+                        local_diff_vecs,
+                    )
 
                 loss = outputs["loss"]
 
@@ -465,11 +474,12 @@ def main():
                     f"MSE_TI: {outputs['mse_teacher'].item():.8f} | "
                 )
 
-        if epoch % 4 == 0 or epoch == args.num_epochs - 1:
+        if epoch % 2 == 0 or epoch == args.num_epochs - 1:
             model_logger.on_epoch_end(accelerator, model, epoch)
 
 
 if __name__ == "__main__":
     main()
     
-# nohup accelerate launch --num_processes 4 --gpu_ids 0,1,2,3 --main_process_port=29501 train_3.py > zlog/train_qwenemb/qwenemb_dataset2_cosine_smoothl1_loss_dual_block2_bf16.log 2>&1 &
+# nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7,8 --main_process_port=29501 train_3.py > zlog/train_clipemb/clipemb_dataset20k_contrastive_loss.log 2>&1 &
+# nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7,8 --main_process_port=29501 train_3.py > zlog/train_qwenemb/qwenemb_dataset20k_contrastive_loss_blocck2_dual_0.log 2>&1 &

@@ -186,7 +186,7 @@ COCO_val2014_000000020641.jpg,a person preparing a cake in the kitchen,"{'prepar
 COCO_val2014_000000039053.jpg,A meal of mediterranean food at a cafe,"{'mediterranean food': [], 'cafe': [158713], 'meal': [186742]}"
 COCO_val2014_000000454810.jpg,Kitchen sink with dishes and knives with various kitchenware,"{'kitchen sink': [269231], 'dishes and knives': [77096], 'kitchenware': [210268]}"
 COCO_val2014_000000256222.jpg,A woman walking into the ocean while in a bathing suit.,"{'woman in bathing suit': [223498], 'ocean': [224794]}"
-COCO_val2014_000000085131.jpg,there is a cat that is laying inside a luggage,"{'cat': [31432], 'laying inside luggage': [220934]}"
+COCO_val2014_000000085131.jpg,there is a cat that is laying inside a luggage,"{'cat': [31432], 'laying inside luggage': [220 934]}"
 COCO_val2014_000000522638.jpg,two stuffed animals a bear and a monkey,{'stuffed animals': [248186]}
 COCO_val2014_000000188346.jpg,a large truck on a run way ,"{'truck': [116399], 'runway': []}"
 COCO_val2014_000000498453.jpg,an image of a man on a surfboard that is riding the ocean waves,"{'man on surfboard riding ocean waves': [26900, 82397]}"

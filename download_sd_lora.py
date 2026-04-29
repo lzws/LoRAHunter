@@ -4,7 +4,7 @@ from modelscope.hub.api import HubApi
 
 
 api = HubApi()
-api.login('ms-b99bca69-c5d6-48b9-aa6d-58cb49ed57ac')
+api.login('ms-f2fdbf7c-5f13-4f11-ab7c-45ba458c0077')
 
 
 model_list = ['lzwecnu/civitai-lora','lzwecnu/civitai-lora-10k-20k','lzwecnu/civitai-lora-20k-30k',
@@ -94,8 +94,8 @@ def organize_pth_files(src, dst):
                 print(f"⚠️ 跳过: {filename} (文件名长度不足4位)")
 
 def move_file():
-    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb_2"
-    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb"
+    emb_dir = "/shark/zhiwen/LoRAHunter/train_set_txtemb_10k/train_set_txtemb_10k_2"
+    tar_dir = "/shark/zhiwen/LoRAHunter/train_set_txtemb_10k"
     dir_1_list = os.listdir(emb_dir)
     for dir_1 in dir_1_list:
         dir_2_list = os.listdir(os.path.join(emb_dir, dir_1))
@@ -109,8 +109,8 @@ def move_file():
     print("✅ 移动完成！")
 
 def copy_file():
-    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen"
-    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec"
+    emb_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb"
+    tar_dir = "/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-diffvec"
     dir_1_list = os.listdir(emb_dir)
     for dir_1 in dir_1_list:
         dir_2_list = os.listdir(os.path.join(emb_dir, dir_1))
@@ -120,6 +120,7 @@ def copy_file():
             for emb_file in emb_files:
                 target_path = os.path.join(tar_dir, dir_1, dir_2, emb_file)
                 if emb_file.endswith("_diffvec.pth") and not os.path.exists(target_path):
+                    print(f"✅ 已复制: {emb_file} -> target/{dir_1}/{dir_2}/")
                     target_path = os.path.join(tar_dir, dir_1, dir_2, emb_file)
                     shutil.copy(os.path.join(emb_dir, dir_1, dir_2, emb_file), target_path)
     print("✅ 复制完成！")
@@ -186,29 +187,22 @@ if __name__ == "__main__":
     # organize_pth_files(source_folder, target_root)
     # print("\n所有文件整理完毕！")
 
+    #模型下载
+    from modelscope import snapshot_download
+    model_dir = snapshot_download('Qwen/Qwen3-VL-Embedding-8B')
+
     # 使用示例
-    # unzip_fix_encoding("SDv15-LoRA-DiffVec/Diffimage-SD-emb-2-2400-6400-8800-10000.zip", "./DiffImage_SD-emb_2")
+    # unzip_fix_encoding("SDv15-LoRA-DiffVec/train_set_txtemb_10k_2.zip", "./train_set_txtemb_10k")
     # model_dir = snapshot_download('lzwecnu/SDv15-LoRA-DiffVec',local_dir='SDv15-LoRA-DiffVec')
 
     # count_file()
-    emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
+    # emb_saver = EmbSaver(emb_path='Diffimage-SD-emb-qwen', root_image_path='Diffimage-SD')
 
-    file_size("/shark/zhiwen/LoRAHunter/train_set_txtemb_10k/10/00/100005.pth")
-    file_size("/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec/10/00/100005_diffvec.pth")
+    copy_file()
 
-    # text_emb = emb_saver.load_txtemb(100005)
-    # print(text_emb.shape, text_emb.dtype)
-    # vec_emb = emb_saver.load_vec(100005)
-    # print(vec_emb.shape, vec_emb.dtype)
 
-    inspect_pth("/shark/zhiwen/LoRAHunter/train_set_txtemb_10k/10/00/100005.pth")
-    inspect_pth("/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen-diffvec/10/00/100005_diffvec.pth")
+
     
-
-
-
-
-
 
 
 # modelscope download --model lzwecnu/civitai-lora lora_4062.safetensors --local_dir ./dir

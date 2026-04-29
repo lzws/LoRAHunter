@@ -204,7 +204,7 @@ def extract_concept(text):
 
 def make_retrieval_testdata():
     coco_data = pd.read_csv("coco-1k.csv")
-    selected_data = coco_data.sample(n=125, random_state=42+5)
+    selected_data = coco_data.sample(n=250, random_state=42+5)
     datas = []
     j = 0
     for i, row in selected_data.iterrows():
@@ -221,7 +221,7 @@ def make_retrieval_testdata():
         j+=1
     partip = pd.read_csv("/shark/zhiwen/LoRAHunter/PartiPrompts.tsv", sep='\t')
     last_100 = partip.iloc[-1300:]
-    select_p = last_100.sample(n=125, random_state=42+5)
+    select_p = last_100.sample(n=250, random_state=42+5)
     for i, row in select_p.iterrows():
         # image_id = row['image_id']
         prompt = row['Prompt']
@@ -234,7 +234,7 @@ def make_retrieval_testdata():
             'seed': i + 789,
         })
         j+=1
-    with open('retrieval_testdata_250.jsonl', 'a', encoding='utf-8') as f:
+    with open('retrieval_testdata_500.jsonl', 'a', encoding='utf-8') as f:
         for data in datas:
             f.write(json.dumps(data, ensure_ascii=False) + '\n')
     

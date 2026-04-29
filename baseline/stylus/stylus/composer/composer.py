@@ -219,61 +219,62 @@ def compose(prompt: str,
     if not response_str:
         return {}
     
-    print(response_str)
+    
+    response_str = response_str.replace('```json','').replace('```', '').replace('json', '')
+    print(f"prompt {prompt}, response_str: {response_str}")
     res = json.loads(response_str)
-    print(res)
     return res
 
-    # Convert composer response string to dict.
-    response_dict = convert_response_str_to_dict(response_str)
-    adapter_concepts_dict = {}
-    seen_ids = []
-    for concept, adapter_dict in response_dict.items():
-        # Sus edge case.
-        if concept.lower() == 'prompt':
-            continue
-        print(f"Concept: {concept}")
-        if concept not in adapter_concepts_dict:
-            adapter_concepts_dict[concept] = []
-        for id, desc in adapter_dict.items():
-            if int(id) in seen_ids:
-                continue
-            seen_ids.append(int(id))
-            if int(id) >= len(adapters):
-                continue
-            le_adapter = adapters[int(id)]
-            adapter_concepts_dict[concept].append(le_adapter)
-            print(f"\t- {le_adapter.title}: {desc}")
-    return adapter_concepts_dict
+    # # Convert composer response string to dict.
+    # response_dict = convert_response_str_to_dict(response_str)
+    # adapter_concepts_dict = {}
+    # seen_ids = []
+    # for concept, adapter_dict in response_dict.items():
+    #     # Sus edge case.
+    #     if concept.lower() == 'prompt':
+    #         continue
+    #     print(f"Concept: {concept}")
+    #     if concept not in adapter_concepts_dict:
+    #         adapter_concepts_dict[concept] = []
+    #     for id, desc in adapter_dict.items():
+    #         if int(id) in seen_ids:
+    #             continue
+    #         seen_ids.append(int(id))
+    #         if int(id) >= len(adapters):
+    #             continue
+    #         le_adapter = adapters[int(id)]
+    #         adapter_concepts_dict[concept].append(le_adapter)
+    #         print(f"\t- {le_adapter.title}: {desc}")
+    # return adapter_concepts_dict
 
 
 if __name__ == '__main__':
     prompt = "A man riding a skateboard down a side walk."
     # metadata_file = '/shark/zhiwen/LoRAHunter/sd_encoder/retrieval_testdata_100_calllora_totalpool_clip.jsonl'
-    test_data_path = '/shark/zhiwen/LoRAHunter/sd_encoder/testdata_250_calllora_totalpool_clip.jsonl'
+    test_data_path = '/shark/zhiwen/LoRAHunter/sd_encoder/test_data/retrieval_testdata_500_calllora_totalpool_clip.jsonl'
     with open(test_data_path, 'r') as f:
         test_datas = [json.loads(line) for line in f.readlines()]
     
-    lora_metadata_path = '/shark/zhiwen/LoRAHunter/SD_adapter_metadata/exist_file_adapters.jsonl'
+    lora_metadata_path = '/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl'
     with open(lora_metadata_path, 'r') as f:
         lora_metadatas = [json.loads(line) for line in f.readlines()]
 
     lora_metadatas_map = {one['model_file']: one for one in lora_metadatas}
 
     # adapters = compute_rankings(prompt=prompt, top_k=200, policy='rank')
-    for data in test_datas[:175]:
+    for data in test_datas[318:]:
         prompt = data['prompt']
         retrieval_results = data['retrieval_results']
         res = retrieval_results[prompt]
         adapters = [lora_metadatas_map[one['model_file']] for one in res]
         try:
-            adapter_concepts_dict = compose(prompt, adapters)
+            adapter_concepts_dict = compose(prompt, adapters[:100])
             # print(adapter_concepts_dict)
             data['rerank_results'] = adapter_concepts_dict
-            with open('testdata_250_totalpool_stylus.jsonl', 'a') as f:
+            with open('testdata_500_totalpool_stylus.jsonl', 'a') as f:
                 f.write(json.dumps(data)+'\n')
         except Exception as e:
             print(f"error: {str(e)}")
             data['rerank_results'] = {}
-            with open('testdata_250_totalpool_stylus.jsonl', 'a') as f:
+            with open('testdata_500_totalpool_stylus.jsonl', 'a') as f:
                 f.write(json.dumps(data)+'\n')

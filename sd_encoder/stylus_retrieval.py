@@ -13,6 +13,73 @@ from dashscope import Generation
 import dashscope
 
 
+
+def build_lora_index_clip(
+    lora_pool_metadata_file,
+    save_path="lora_index_clip_1.pt",
+    batch_size=64,
+    device="cuda:4",
+):
+    # load metadata
+    with open(lora_pool_metadata_file, "r", encoding="utf-8") as f:
+        datas = [json.loads(line) for line in f]
+
+    print(f"[CLIP Index] loaded {len(datas)} items from {lora_pool_metadata_file}")
+
+    # load text encoder
+    clip_encoder = TextImageEncoder().to(device=device)
+    clip_encoder.eval()
+
+    model_files = []
+    texts = []
+
+    # build text for each LoRA
+    for data in datas:
+        model_file = data.get("model_file", "")
+        title = data.get("title", "")
+        description = data.get("llm_description", "")
+        tags = data.get("tags", [])
+
+        if isinstance(tags, list):
+            tag_str = ", ".join(tags)
+        else:
+            tag_str = str(tags)
+
+        text = (
+            f"Convert Stable Diffusion finetuned adapter description into an embedding for search: "
+            f"Title: {title}; Description: {description}; Tags: {tag_str};"
+        )
+
+        model_files.append(model_file)
+        texts.append(text)
+
+    all_embs = []
+
+    # batch encode
+    with torch.no_grad():
+        for start in tqdm(range(0, len(texts), batch_size), desc="Building CLIP text index"):
+            end = min(start + batch_size, len(texts))
+            batch_texts = texts[start:end]
+
+            emb = clip_encoder.encoding_text(batch_texts)   # [B, D]
+            emb = F.normalize(emb, dim=-1)
+            all_embs.append(emb.cpu())
+
+    all_embs = torch.cat(all_embs, dim=0)   # [N, D]
+
+    # save
+    torch.save({
+        "model_files": model_files,
+        "embeddings": all_embs,
+    }, save_path)
+
+    print(f"[CLIP Index] saved to {save_path}")
+    print(f"[CLIP Index] num items: {len(model_files)}")
+    print(f"[CLIP Index] embedding shape: {all_embs.shape}")
+
+
+
+
 NEGATIVE_PROMPTS = [
     "realisticvision-negative-embedding",
     "ng_deepnegative_v1_75t",
@@ -56,81 +123,6 @@ NEGATIVE_PROMPTS = [
 ]
 NEGATIVE_PROMPT_STR = ", ".join(NEGATIVE_PROMPTS)
 
-def build_lora_index_clip(
-    lora_pool_metadata_file='/shark/zhiwen/LoRAHunter/SD_adapter_metadata/exist_file_adapters.jsonl',
-    ref_index_path="lora_index.pt",
-    save_path="lora_index_clip.pt",
-    batch_size=64,
-    device="cuda",
-):
-    ref_index = torch.load(ref_index_path, map_location="cpu")
-    ref_model_files = ref_index["model_files"]
-
-    print(f"[CLIP Index] loaded reference index: {ref_index_path}")
-    print(f"[CLIP Index] reference model files: {len(ref_model_files)}")
-
-    with open(lora_pool_metadata_file, "r", encoding="utf-8") as f:
-        all_datas = [json.loads(line) for line in f]
-
-    metadata_map = {}
-    for data in all_datas:
-        model_file = data.get("model_file", "")
-        metadata_map[model_file] = data
-
-    matched_model_files = []
-    texts = []
-
-    for model_file in ref_model_files:
-        if model_file not in metadata_map:
-            continue
-
-        data = metadata_map[model_file]
-        title = data.get("title", "")
-        description = data.get("llm_description", "")
-        tags = data.get("tags", [])
-
-        if isinstance(tags, list):
-            tag_str = ", ".join(tags)
-        else:
-            tag_str = str(tags)
-
-        text = (
-            f"Convert Stable Diffusion finetuned adapter description into an embedding for search: "
-            f"Title: {title}; Description: {description}; Tags: {tag_str};"
-        )
-
-        matched_model_files.append(model_file)
-        texts.append(text)
-
-    print(f"[CLIP Index] matched items: {len(matched_model_files)}")
-
-    clip_encoder = TextImageEncoder().to(device=device)
-    clip_encoder.eval()
-
-    all_embs = []
-    with torch.no_grad():
-        for start in tqdm(range(0, len(texts), batch_size), desc="Building CLIP text index"):
-            end = min(start + batch_size, len(texts))
-            batch_texts = texts[start:end]
-
-            emb = clip_encoder.encoding_text(batch_texts)   # [B, D]
-            emb = F.normalize(emb, dim=-1)
-            all_embs.append(emb.cpu())
-
-    if len(all_embs) == 0:
-        raise RuntimeError("No embeddings were built for CLIP index.")
-
-    all_embs = torch.cat(all_embs, dim=0)
-
-    torch.save({
-        "model_files": matched_model_files,
-        "embeddings": all_embs,
-    }, save_path)
-
-    print(f"[CLIP Index] saved to {save_path}")
-    print(f"[CLIP Index] num items: {len(matched_model_files)}")
-    print(f"[CLIP Index] embedding shape: {all_embs.shape}")
-
 
 
 class LoRARetriever:
@@ -166,11 +158,12 @@ class LoRARetriever:
 
 
 
+
 def call_lora():
-    index_path = "lora_index/lora_index_clip.pt"
+    index_path = "lora_index/lora_index_clip_1.pt"
     retriever = LoRARetriever(index_path=index_path, device="cuda:4")
 
-    test_data_path = 'test_data/retrieval_testdata_250.jsonl'
+    test_data_path = 'test_data/retrieval_testdata_500.jsonl'
     with open(test_data_path, 'r') as f:
         test_datas = [json.loads(line) for line in f.readlines()]
 
@@ -184,23 +177,23 @@ def call_lora():
             # retrieval_description = ec['retrieval_description']
 
             
-            top5 = retriever.retrieve(query_text=keyword,top_k=75)
+            top5 = retriever.retrieve(query_text=keyword,top_k=150)
             data['retrieval_results'][keyword] = top5
             # res_datas.append(data)
-        with open("retrieval_testdata_100_calllora_totalpool_clip.jsonl", 'a') as f:
+        with open("test_data/retrieval_testdata_500_calllora_totalpool_clip.jsonl", 'a') as f:
             f.write(json.dumps(data)+'\n')
 
 
 from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
 import gc
-lora_base_path = "/shark/zhiwen/LoRAHunter/sd_lora/lzwecnu"
+lora_base_path = "/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1"
 
-def generate_images(num=0):
-    test_data_path = '/shark/zhiwen/LoRAHunter/baseline/stylus/stylus/composer/testdata_250_totalpool_stylus.jsonl'
+def generate_images(num=0,start=0,end=250,model_type='original'):
+    test_data_path = 'test_data/testdata_500_totalpool_stylus.jsonl'
     with open(test_data_path, 'r') as f:
         test_datas = [json.loads(line) for line in f.readlines()]
 
-    lora_metadata_path = '/shark/zhiwen/LoRAHunter/SD_adapter_metadata/exist_file_adapters.jsonl'
+    lora_metadata_path = '/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl'
     with open(lora_metadata_path, 'r') as f:
         lora_metadatas = [json.loads(line) for line in f.readlines()]
 
@@ -211,23 +204,30 @@ def generate_images(num=0):
     # num = 0
     device = f"cuda:{num}"
 
-    start = 0 + num*25
-    end = start + 25
 
-    start, end = 0, 175
 
     seed_num = num
-    seeds = [42,6734,3252,23498,62991]
-    save_path = f"outputs/{test_data_path.split('/')[-1].split('.')[0]}"
+    seeds = [42,6734,3252,23498,62991,4324,54894,12047592,163884,63485,927429,238451]
+    seeds = seeds[:10]
+
+    save_path = f"outputs2/stylus_{test_data_path.split('/')[-1].split('.')[0]}/{model_type}"
     os.makedirs(save_path, exist_ok=True)
 
     # load sd 1.5 pipe
-    # pipe = StableDiffusionPipeline.from_pretrained(
-    #     "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/stable-diffusion-v1-5", 
-    #     torch_dtype=torch_dtype
-    # )
-    model_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/lzwecnu/SDv1-5-model/realisticVisionV60B1_v51VAE.safetensors'
-    pipe = StableDiffusionPipeline.from_single_file(model_path, torch_dtype=torch_dtype, local_files_only=True)
+    if model_type == 'original':
+
+        pipe = StableDiffusionPipeline.from_pretrained(
+            "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/stable-diffusion-v1-5", 
+            torch_dtype=torch.bfloat16
+        )
+        prompt_bias = ''
+    elif model_type == 'realistic':
+        prompt_bias = ' realistic, high quality'
+        model_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/lzwecnu/SDv1-5-model/realisticVisionV60B1_v51VAE.safetensors'
+        print(f"load from {model_path}")
+        pipe = StableDiffusionPipeline.from_single_file(model_path, torch_dtype=torch.bfloat16, local_files_only=True)
+    else:
+        raise ValueError
 
     pipe.safety_checker = None
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config,algorithm_type="dpmsolver++")
@@ -242,18 +242,29 @@ def generate_images(num=0):
         adapter_names = []
         # alpha = max(1/len(rerank_results),0.5)
         alpha = 0.8
+
+
+
+        prompt = data['prompt']
+        prompts = [prompt + prompt_bias] * len(seeds)
+        generators = [
+            torch.Generator(device=device).manual_seed(seed)
+            for seed in seeds
+        ]
+
         if len(rerank_results) == 0:
-            prompt = data['prompt']
-            seed = seeds[seed_num]
-            image = pipe(
-                        prompt, 
-                        negative_prompt="low quality, bad quality, worst quality, blurry, out of focus, bad hands, missing fingers, extra limbs, deformed, distorted,", 
-                        num_inference_steps=40,
-                        num_images_per_prompt=1,
-                        generator=torch.Generator(device=device).manual_seed(seed),
-                        guidance_scale=7.5
-                    ).images[0]
-            image.save(f"outputs/retrieval_testdata_100_stylus/rerank_{i+start}.png")
+
+
+            images = pipe(
+                    prompts, 
+                    negative_prompt=[NEGATIVE_PROMPT_STR] * len(seeds),
+                    num_inference_steps=35,
+                    num_images_per_prompt=1,
+                    generator=generators,
+                    guidance_scale=7
+                ).images
+            for seed_num, (seed, image) in enumerate(zip(seeds, images)):
+                image.save(f"{save_path}/rerank_{i+start}_{seed_num}.png")
             # continue
 
         for keyword,loras in rerank_results.items():
@@ -277,25 +288,26 @@ def generate_images(num=0):
             pipe.set_adapters(adapter_names,adapter_weights=[alpha]*len(adapter_names))
 
         
-        prompt = data['prompt']
-        seed = seeds[seed_num]
-        image = pipe(
-                    prompt + " realistic, high quality", 
-                    negative_prompt=NEGATIVE_PROMPT_STR, 
-                    num_inference_steps=35,
-                    num_images_per_prompt=1,
-                    generator=torch.Generator(device=device).manual_seed(seed),
-                    guidance_scale=7
-                ).images[0]
-        image.save(f"{save_path}/rerank_{i+start}_{seed_num}.png")
+        
+        images = pipe(
+                prompts, 
+                negative_prompt=[NEGATIVE_PROMPT_STR] * len(seeds), 
+                num_inference_steps=35,
+                num_images_per_prompt=1,
+                generator=generators,
+                guidance_scale=7
+            ).images
+        for seed_num, (seed, image) in enumerate(zip(seeds, images)):
+            image.save(f"{save_path}/rerank_{i+start}_{seed_num}.png")
 
         pipe.unload_lora_weights()
         gc.collect()
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    # build_lora_index_clip()
+    # build_lora_index_clip(lora_pool_metadata_file="/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl")
     # call_lora()
-    generate_images(4)
+    # realistic original
+    generate_images(num=3,start=250,end=500,model_type='realistic')
 
-# nohup python stylus_retrieval.py > zlog/generate_images_sty_4.log 2>&1 &
+# nohup python stylus_retrieval.py > zlog/test_log/generate_stylus_realistic_1.log 2>&1 &

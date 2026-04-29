@@ -7,7 +7,9 @@ from modelscope import snapshot_download
 #验证 ModelScope token
 from modelscope.hub.api import HubApi
 api = HubApi()
-api.login('ms-b99bca69-c5d6-48b9-aa6d-58cb49ed57ac')
+# api.login('')
 
 
-model_dir = snapshot_download('Qwen/Qwen3-VL-Reranker-8B', local_dir="./models/Qwen/Qwen3-VL-Reranker-8B")
+# model_dir = snapshot_download('Qwen/Qwen3-VL-Reranker-8B', local_dir="./models/Qwen/Qwen3-VL-Reranker-8B")
+
+model_dir = snapshot_download('facebook/dinov3-vit7b16-pretrain-lvd1689m', local_dir="./models/facebook/dinov3-vit7b16-pretrain-lvd1689m")

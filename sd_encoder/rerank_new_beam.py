@@ -1,44 +1,86 @@
-import heapq
-import itertools
 import json
 from typing import List, Dict, Any, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-
+from models import TextImageEncoder, QwenVLEncoder
+from collections import Counter
 
 # ==========================================================
 # 1. LoRA embedding index
 # ==========================================================
 class LoRAIndexStore:
     """
-    从离线构建好的 LoRA embedding 索引中加载:
-    - model_files: List[str]
-    - embeddings:  Tensor [N, D]
+    兼容:
+    - single index:
+        {
+            "model_files": [...],
+            "embeddings": Tensor[N, D]
+        }
+      或
+        {
+            "model_files": [...],
+            "txt_embeddings": Tensor[N, D],
+            "is_dual": False
+        }
 
-    并提供:
-    - model_file -> embedding 的查询能力
+    - dual index:
+        {
+            "model_files": [...],
+            "txt_embeddings": Tensor[N, Dt],
+            "img_embeddings": Tensor[N, Di],
+            "is_dual": True
+        }
 
-    约定:
-    - embeddings 在加载后会做 L2 normalize
-    - 后续相似度统一使用点积 = cosine similarity
+    对外提供:
+    - model_file -> item embedding dict
     """
     def __init__(self, index_path: str, device: str = "cpu"):
         self.device = device
 
         index_data = torch.load(index_path, map_location="cpu")
         self.model_files = index_data["model_files"]
-        self.embeddings = index_data["embeddings"].float()
-        self.embeddings = F.normalize(self.embeddings, dim=-1)
+        self.is_dual = index_data.get("is_dual", False)
+
+        if "txt_embeddings" in index_data:
+            self.txt_embeddings = index_data["txt_embeddings"].to(torch.bfloat16)
+        elif "embeddings" in index_data:
+            self.txt_embeddings = index_data["embeddings"].to(torch.bfloat16)
+        else:
+            raise KeyError("Index file must contain 'txt_embeddings' or 'embeddings'")
+
+        self.txt_embeddings = F.normalize(self.txt_embeddings, dim=-1)
+
+        self.img_embeddings = None
+        if self.is_dual:
+            if "img_embeddings" not in index_data:
+                raise KeyError("Dual index must contain 'img_embeddings'")
+            self.img_embeddings = index_data["img_embeddings"].to(torch.bfloat16)
+            self.img_embeddings = F.normalize(self.img_embeddings, dim=-1)
 
         self.model_file_to_idx = {mf: i for i, mf in enumerate(self.model_files)}
-        print(f"[LoRAIndexStore] loaded {len(self.model_files)} embeddings from {index_path}")
 
-    def get_embedding(self, model_file: str) -> Optional[torch.Tensor]:
+        print(f"[LoRAIndexStore] loaded {len(self.model_files)} items from {index_path}")
+        print(f"[LoRAIndexStore] is_dual={self.is_dual}")
+        print(f"[LoRAIndexStore] txt_embeddings shape={self.txt_embeddings.shape}")
+        if self.img_embeddings is not None:
+            print(f"[LoRAIndexStore] img_embeddings shape={self.img_embeddings.shape}")
+
+    def get_embedding(self, model_file: str) -> Optional[Dict[str, torch.Tensor]]:
         idx = self.model_file_to_idx.get(model_file, None)
         if idx is None:
             return None
-        return self.embeddings[idx].to(self.device)
+
+        item = {
+            "txt_embedding": self.txt_embeddings[idx].to(self.device),
+            "img_embedding": None,
+            "is_dual": self.is_dual,
+        }
+
+        if self.img_embeddings is not None:
+            item["img_embedding"] = self.img_embeddings[idx].to(self.device)
+
+        return item
 
 
 # ==========================================================
@@ -46,87 +88,37 @@ class LoRAIndexStore:
 # ==========================================================
 class LoRACombinationOptimizer:
     """
-    使用 Beam Search 的组合优化器。
+    dual-head 兼容版：
+    - query/concept/full_prompt 侧当前只有 text embedding
+    - 如果 index 是 dual，则用同一个 text query embedding 同时和 txt/img route 打分
+    - 所有 match / compatibility / redundancy / combo embedding 都支持双路融合
 
-    --------------------------------------------------------
-    主思想
-    --------------------------------------------------------
-    我们把组合打分拆成两层：
-
-    1) 搜索阶段 search_score（便宜）
-       search_score =
-           individual_score
-         + pairwise_score
-
-       用于 beam 扩展时快速筛掉差的 partial combinations。
-
-    2) 最终阶段 final_score（完整）
-       final_score =
-           search_score
-         + global_alignment
-
-       对 beam 输出的完整组合再做精确重排。
-
-    --------------------------------------------------------
-    为什么这样设计
-    --------------------------------------------------------
-    - global alignment 是 set-level 的，放在 beam 每一步都算不划算
-    - individual + pairwise 都有明确的增量形式，适合 beam 扩展
-    - 最终只对有限个完整组合算 global，速度更稳
-
-    --------------------------------------------------------
-    目标函数
-    --------------------------------------------------------
-    total_score =
-        individual_match
-      + pairwise_utility
-      + global_alignment
-
-    其中：
-    - individual_match:
-        每个 concept 选出的 LoRA 是否匹配 concept / prompt
-    - pairwise_utility:
-        compatibility reward - redundancy penalty
-    - global_alignment:
-        组合整体与完整 prompt 的对齐
+    route_text_ratio:
+        text route 的权重
+        img route 的权重 = 1 - route_text_ratio
     """
 
     def __init__(
         self,
-        # --------------------------------------------------
-        # 主目标权重
-        # --------------------------------------------------
-        alpha: float = 1.0,          # individual match 权重
-        beta_compat: float = 0.3,    # compatibility reward 权重
-        eta_redund: float = 0.4,     # redundancy penalty 权重
-        delta: float = 0.5,          # global alignment 权重
+        alpha: float = 1.0,
+        beta_compat: float = 0.3,
+        eta_redund: float = 0.4,
+        delta: float = 0.5,
 
-        # --------------------------------------------------
-        # individual score 内部权重
-        # match = lambda_concept * sim(lora, concept)
-        #       + lambda_prompt  * sim(lora, full_prompt)
-        # --------------------------------------------------
         lambda_concept: float = 1.0,
         lambda_prompt: float = 0.2,
 
-        # --------------------------------------------------
-        # global weighted fusion 温度
-        # --------------------------------------------------
         global_tau: float = 0.2,
 
-        # --------------------------------------------------
-        # beam search 参数
-        # --------------------------------------------------
-        local_top_m: int = 40,       # 每个 concept 搜索前先保留多少候选
-        beam_width: int = 200,       # beam 每层最多保留多少 partial combos
-        final_pool_size: int = 200,  # 完整组合输出多少候选用于最终 rerank
+        local_top_m: int = 40,
+        beam_width: int = 200,
+        final_pool_size: int = 200,
 
-        # --------------------------------------------------
-        # diversified reranking (MMR) 参数
-        # --------------------------------------------------
         lambda_quality: float = 0.8,
         overlap_weight: float = 0.7,
         emb_weight: float = 0.3,
+
+        route_text_ratio: float = 1.0,
 
         device: str = "cpu",
     ):
@@ -147,6 +139,7 @@ class LoRACombinationOptimizer:
         self.overlap_weight = overlap_weight
         self.emb_weight = emb_weight
 
+        self.route_text_ratio = route_text_ratio
         self.device = device
 
     # ------------------------------------------------------
@@ -155,29 +148,99 @@ class LoRACombinationOptimizer:
     def _normalize_vec(self, x: torch.Tensor) -> torch.Tensor:
         return F.normalize(x, dim=0)
 
+    def _normalize_item_embedding(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        new_item = dict(item)
+
+        if new_item.get("txt_embedding", None) is not None:
+            new_item["txt_embedding"] = self._normalize_vec(new_item["txt_embedding"].to(self.device))
+
+        if new_item.get("img_embedding", None) is not None:
+            new_item["img_embedding"] = self._normalize_vec(new_item["img_embedding"].to(self.device))
+
+        return new_item
+
+    def _route_query_to_lora_score(
+        self,
+        query_emb: torch.Tensor,
+        item: Dict[str, Any],
+    ) -> torch.Tensor:
+        """
+        query_emb 当前只有 text emb
+        若 item 有 dual routes:
+            score = r * dot(query, txt_emb) + (1-r) * dot(query, img_emb)
+        否则退化为 text route
+        """
+        txt_emb = item["txt_embedding"]
+        img_emb = item.get("img_embedding", None)
+
+        txt_score = torch.dot(query_emb, txt_emb)
+
+        if img_emb is None:
+            return txt_score
+
+        img_score = torch.dot(query_emb, img_emb)
+        return self.route_text_ratio * txt_score + (1.0 - self.route_text_ratio) * img_score
+
+    def _item_to_item_similarity(
+        self,
+        item_a: Dict[str, Any],
+        item_b: Dict[str, Any],
+    ) -> torch.Tensor:
+        """
+        LoRA-LoRA 相似度:
+        - single: dot(txt, txt)
+        - dual:
+            sim = r * dot(txt_a, txt_b) + (1-r) * dot(img_a, img_b)
+        """
+        txt_a = item_a["txt_embedding"]
+        txt_b = item_b["txt_embedding"]
+        txt_sim = torch.dot(txt_a, txt_b)
+
+        img_a = item_a.get("img_embedding", None)
+        img_b = item_b.get("img_embedding", None)
+
+        if img_a is None or img_b is None:
+            return txt_sim
+
+        img_sim = torch.dot(img_a, img_b)
+        return self.route_text_ratio * txt_sim + (1.0 - self.route_text_ratio) * img_sim
+
+    def _get_fused_item_embedding(self, item: Dict[str, Any]) -> torch.Tensor:
+        """
+        给组合 embedding / MMR 用的单个 item 融合 embedding。
+
+        single:
+            fused = txt_emb
+
+        dual:
+            fused = normalize(r * txt_emb + (1-r) * img_emb)
+        """
+        txt_emb = item["txt_embedding"]
+        img_emb = item.get("img_embedding", None)
+
+        if img_emb is None:
+            return txt_emb
+
+        if txt_emb.shape[-1] != img_emb.shape[-1]:
+            # 如果维度不同，退化为 text route
+            return txt_emb
+
+        fused = self.route_text_ratio * txt_emb + (1.0 - self.route_text_ratio) * img_emb
+        fused = F.normalize(fused, dim=0)
+        return fused
+
     # ------------------------------------------------------
     # item-level match
     # ------------------------------------------------------
     def compute_match_score(
         self,
-        lora_emb: torch.Tensor,
+        item: Dict[str, Any],
         concept_emb: torch.Tensor,
         full_prompt_emb: torch.Tensor,
         retrieval_score: Optional[float] = None,
     ) -> torch.Tensor:
-        """
-        单个 LoRA 的局部匹配分数：
-
-            match_i =
-                lambda_concept * cos(lora_i, concept_i)
-              + lambda_prompt  * cos(lora_i, full_prompt)
-
-        说明：
-        - 第一项保证和当前 concept 对齐
-        - 第二项保证不要偏离完整 prompt 太远
-        """
-        local_sim = torch.dot(lora_emb, concept_emb)
-        prompt_sim = torch.dot(lora_emb, full_prompt_emb)
+        local_sim = self._route_query_to_lora_score(concept_emb, item)
+        prompt_sim = self._route_query_to_lora_score(full_prompt_emb, item)
         score = self.lambda_concept * local_sim + self.lambda_prompt * prompt_sim
         return score
 
@@ -186,59 +249,37 @@ class LoRACombinationOptimizer:
     # ------------------------------------------------------
     def compute_redundancy(
         self,
-        emb_i: torch.Tensor,
-        emb_j: torch.Tensor,
+        item_i: Dict[str, Any],
+        item_j: Dict[str, Any],
     ) -> torch.Tensor:
-        """
-        冗余惩罚：
-            redund(i, j) = max(0, cos(e_i, e_j))
-
-        只惩罚相似/重复，不奖励“负相似”。
-        """
-        sim = torch.dot(emb_i, emb_j)
+        sim = self._item_to_item_similarity(item_i, item_j)
         return torch.relu(sim)
 
     def compute_compatibility(
         self,
-        emb_i: torch.Tensor,
-        emb_j: torch.Tensor,
+        item_i: Dict[str, Any],
+        item_j: Dict[str, Any],
         full_prompt_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        兼容奖励（简化 proxy）：
-
-            compat(i, j)
-            = 0.5 * [ cos(e_i, prompt) + cos(e_j, prompt) ]
-
-        含义：
-        - 如果两个 LoRA 都对完整 prompt 比较友好，则更可能兼容。
-        """
-        prompt_fit_i = torch.dot(emb_i, full_prompt_emb)
-        prompt_fit_j = torch.dot(emb_j, full_prompt_emb)
+        prompt_fit_i = self._route_query_to_lora_score(full_prompt_emb, item_i)
+        prompt_fit_j = self._route_query_to_lora_score(full_prompt_emb, item_j)
         compat = 0.5 * (prompt_fit_i + prompt_fit_j)
         return compat
 
     def compute_pair_utility(
         self,
-        emb_i: torch.Tensor,
-        emb_j: torch.Tensor,
+        item_i: Dict[str, Any],
+        item_j: Dict[str, Any],
         full_prompt_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        pair utility = compatibility reward - redundancy penalty
-
-            pair_utility(i, j)
-            = beta_compat * compat(i, j)
-            - eta_redund * redund(i, j)
-        """
         compat = self.compute_compatibility(
-            emb_i=emb_i,
-            emb_j=emb_j,
+            item_i=item_i,
+            item_j=item_j,
             full_prompt_emb=full_prompt_emb,
         )
         redund = self.compute_redundancy(
-            emb_i=emb_i,
-            emb_j=emb_j,
+            item_i=item_i,
+            item_j=item_j,
         )
         return self.beta_compat * compat - self.eta_redund * redund
 
@@ -251,29 +292,21 @@ class LoRACombinationOptimizer:
         concept_embs: List[torch.Tensor],
         full_prompt_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        组合 embedding（quality-weighted fusion）：
-
-            w_i = softmax(match_i / global_tau)
-            e_combo = normalize(sum_i w_i * e_i)
-
-        比简单平均更稳定。
-        """
-        embs = []
+        fused_embs = []
         item_scores = []
 
         for item, concept_emb in zip(selected_items, concept_embs):
-            emb = item["embedding"]
+            fused_emb = self._get_fused_item_embedding(item)
             match_score = self.compute_match_score(
-                lora_emb=emb,
+                item=item,
                 concept_emb=concept_emb,
                 full_prompt_emb=full_prompt_emb,
                 retrieval_score=item.get("retrieval_score", None),
             )
-            embs.append(emb)
+            fused_embs.append(fused_emb)
             item_scores.append(match_score)
 
-        E = torch.stack(embs, dim=0)
+        E = torch.stack(fused_embs, dim=0)
         item_scores = torch.stack(item_scores, dim=0)
 
         weights = torch.softmax(item_scores / self.global_tau, dim=0)
@@ -287,11 +320,6 @@ class LoRACombinationOptimizer:
         concept_embs: List[torch.Tensor],
         full_prompt_emb: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        全局对齐分数：
-
-            global = delta * cos(combo_emb, full_prompt)
-        """
         combo_emb = self.compute_weighted_combo_embedding(
             selected_items=selected_items,
             concept_embs=concept_embs,
@@ -308,15 +336,6 @@ class LoRACombinationOptimizer:
         concept_embs: List[torch.Tensor],
         full_prompt_emb: torch.Tensor,
     ) -> List[List[Dict[str, Any]]]:
-        """
-        对每个 concept 的候选做预处理：
-        1. embedding normalize
-        2. 预计算 item match score
-        3. 按 item match score 排序
-        4. 每个 concept 只保留前 local_top_m 个
-
-        这样做可以显著减小 beam 扩展分支因子。
-        """
         processed = []
 
         for concept_idx, items in enumerate(candidate_items):
@@ -324,12 +343,10 @@ class LoRACombinationOptimizer:
             cur = []
 
             for item in items:
-                emb = self._normalize_vec(item["embedding"].to(self.device))
-                new_item = dict(item)
-                new_item["embedding"] = emb
+                new_item = self._normalize_item_embedding(item)
 
                 match_score = self.compute_match_score(
-                    lora_emb=emb,
+                    item=new_item,
                     concept_emb=concept_emb,
                     full_prompt_emb=full_prompt_emb,
                     retrieval_score=item.get("retrieval_score", None),
@@ -353,23 +370,6 @@ class LoRACombinationOptimizer:
         concept_embs: List[torch.Tensor],
         concept_names: Optional[List[str]] = None,
     ) -> Tuple[List[List[Dict[str, Any]]], List[torch.Tensor], Optional[List[str]], List[int]]:
-        """
-        可选：在 beam search 前调整 concept 的搜索顺序。
-
-        一个简单且实用的策略：
-        - 候选数量少的 concept 先扩展
-
-        返回：
-        - reordered_candidate_items
-        - reordered_concept_embs
-        - reordered_concept_names
-        - order_map: 新顺序到原顺序的映射
-
-        例如：
-        原顺序 [0,1,2]
-        若排序后 order_map = [2,0,1]
-        表示新第0个concept对应原第2个concept
-        """
         order = list(range(len(candidate_items)))
         order.sort(key=lambda i: len(candidate_items[i]))
 
@@ -386,19 +386,6 @@ class LoRACombinationOptimizer:
         self,
         first_candidates: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """
-        用第一个 concept 的候选初始化 beam。
-
-        每个 partial state 的结构：
-        {
-            "indices": [int],              # 每层候选在各自 concept list 内的索引
-            "items":   [item, ...],        # 已选 items
-            "search_score": float,         # 当前 beam 搜索分数 = individual + pairwise
-        }
-
-        这里初始状态只有一个 item，因此：
-            search_score = alpha * item_match
-        """
         beam = []
 
         for idx, item in enumerate(first_candidates):
@@ -418,20 +405,6 @@ class LoRACombinationOptimizer:
         next_candidates: List[Dict[str, Any]],
         full_prompt_emb: torch.Tensor,
     ) -> List[Dict[str, Any]]:
-        """
-        beam 扩展一层。
-
-        假设当前 beam 中每个 state 已经选了 t 个 LoRA，
-        现在给它加上第 t+1 个 concept 的某个候选 item。
-
-        增量分数：
-            delta =
-                alpha * match(new_item)
-              + sum_{old in state} pair_utility(old, new_item)
-
-        然后：
-            new_search_score = old_search_score + delta
-        """
         new_states = []
 
         for state in beam:
@@ -441,13 +414,11 @@ class LoRACombinationOptimizer:
             for next_idx, next_item in enumerate(next_candidates):
                 delta = self.alpha * next_item["_match_score"]
 
-                next_emb = next_item["embedding"]
                 for old_item in old_items:
-                    old_emb = old_item["embedding"]
                     delta += float(
                         self.compute_pair_utility(
-                            emb_i=old_emb,
-                            emb_j=next_emb,
+                            item_i=old_item,
+                            item_j=next_item,
                             full_prompt_emb=full_prompt_emb,
                         ).item()
                     )
@@ -459,7 +430,6 @@ class LoRACombinationOptimizer:
                 }
                 new_states.append(new_state)
 
-        # 保留 top beam_width
         new_states.sort(key=lambda x: x["search_score"], reverse=True)
         return new_states[:self.beam_width]
 
@@ -469,12 +439,6 @@ class LoRACombinationOptimizer:
         concept_embs: List[torch.Tensor],
         full_prompt_emb: torch.Tensor,
     ) -> List[Dict[str, Any]]:
-        """
-        执行 beam search。
-
-        返回的是完整组合，但此时它们只有 search_score，
-        还没有加上 global score。
-        """
         if len(candidate_items) == 0:
             return []
 
@@ -499,20 +463,11 @@ class LoRACombinationOptimizer:
         full_prompt_emb: torch.Tensor,
         top_pool_size: int,
     ) -> List[Dict[str, Any]]:
-        """
-        对 beam 输出的完整组合计算最终分数：
-
-            final_score = search_score + global_score
-
-        然后按 final_score 排序，保留前 top_pool_size 个。
-        """
         results = []
 
         for state in beam_results:
             selected_items = state["items"]
 
-            # 这里 individual / pairwise 可以直接从 search_score 恢复总量，
-            # 但为了便于分析，我们仍显式计算一份 breakdown
             individual = self.compute_individual_score(
                 selected_items=selected_items,
                 concept_embs=concept_embs,
@@ -548,7 +503,7 @@ class LoRACombinationOptimizer:
         return results[:top_pool_size]
 
     # ------------------------------------------------------
-    # individual / pairwise explicit score (for final breakdown)
+    # individual / pairwise explicit score
     # ------------------------------------------------------
     def compute_individual_score(
         self,
@@ -560,7 +515,7 @@ class LoRACombinationOptimizer:
 
         for item, concept_emb in zip(selected_items, concept_embs):
             score += self.compute_match_score(
-                lora_emb=item["embedding"],
+                item=item,
                 concept_emb=concept_emb,
                 full_prompt_emb=full_prompt_emb,
                 retrieval_score=item.get("retrieval_score", None),
@@ -577,12 +532,12 @@ class LoRACombinationOptimizer:
         n = len(selected_items)
 
         for i in range(n):
-            emb_i = selected_items[i]["embedding"]
+            item_i = selected_items[i]
             for j in range(i + 1, n):
-                emb_j = selected_items[j]["embedding"]
+                item_j = selected_items[j]
                 score += self.compute_pair_utility(
-                    emb_i=emb_i,
-                    emb_j=emb_j,
+                    item_i=item_i,
+                    item_j=item_j,
                     full_prompt_emb=full_prompt_emb,
                 )
 
@@ -597,11 +552,6 @@ class LoRACombinationOptimizer:
         concept_embs: Optional[List[torch.Tensor]] = None,
         full_prompt_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        计算组合自身 embedding，用于结果级 MMR。
-
-        优先使用与主打分一致的 weighted combo embedding。
-        """
         if concept_embs is not None and full_prompt_emb is not None:
             return self.compute_weighted_combo_embedding(
                 selected_items=combo["items"],
@@ -609,15 +559,12 @@ class LoRACombinationOptimizer:
                 full_prompt_emb=full_prompt_emb,
             )
 
-        embs = [item["embedding"] for item in combo["items"]]
+        embs = [self._get_fused_item_embedding(item) for item in combo["items"]]
         emb = torch.stack(embs, dim=0).mean(dim=0)
         emb = F.normalize(emb, dim=0)
         return emb
 
     def overlap_similarity(self, combo_a: Dict[str, Any], combo_b: Dict[str, Any]) -> float:
-        """
-        两个组合的离散重叠率。
-        """
         set_a = set(item["model_file"] for item in combo_a["items"])
         set_b = set(item["model_file"] for item in combo_b["items"])
 
@@ -633,9 +580,6 @@ class LoRACombinationOptimizer:
         concept_embs: Optional[List[torch.Tensor]] = None,
         full_prompt_emb: Optional[torch.Tensor] = None,
     ) -> float:
-        """
-        两个组合 embedding 的 cosine 相似度。
-        """
         if "_combo_emb" not in combo_a:
             combo_a["_combo_emb"] = self.combo_embedding(
                 combo_a,
@@ -658,11 +602,6 @@ class LoRACombinationOptimizer:
         concept_embs: Optional[List[torch.Tensor]] = None,
         full_prompt_emb: Optional[torch.Tensor] = None,
     ) -> float:
-        """
-        组合间综合相似度：
-            overlap_weight * overlap
-          + emb_weight     * embedding_similarity
-        """
         overlap_sim = self.overlap_similarity(combo_a, combo_b)
         emb_sim = self.embedding_similarity(
             combo_a,
@@ -679,9 +618,6 @@ class LoRACombinationOptimizer:
         concept_embs: Optional[List[torch.Tensor]] = None,
         full_prompt_emb: Optional[torch.Tensor] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        用 MMR 从高分候选池里选出多个高质量且不同的组合。
-        """
         if len(combos) <= final_top_k:
             return combos
 
@@ -746,16 +682,6 @@ class LoRACombinationOptimizer:
         return_all_pool: bool = False,
         reorder_concepts: bool = True,
     ) -> Dict[str, Any]:
-        """
-        完整优化流程：
-
-        1. normalize prompt / concepts
-        2. preprocess candidates（预计算 item match，local prune）
-        3. 可选：按候选数重排 concept 搜索顺序
-        4. beam search 得到完整组合（只有 search_score）
-        5. final scoring 加上 global alignment
-        6. diversified reranking 得到多个不同结果
-        """
         if top_pool_size is None:
             top_pool_size = self.final_pool_size
 
@@ -799,7 +725,7 @@ class LoRACombinationOptimizer:
 
         result = {
             "diverse_results": diverse_results,
-            "search_order_map": order_map,   # 新顺序 -> 原顺序
+            "search_order_map": order_map,
         }
         if return_all_pool:
             result["candidate_pool"] = candidate_pool
@@ -810,14 +736,6 @@ class LoRACombinationOptimizer:
 # 3. direct pipeline for retrieval_results
 # ==========================================================
 class CombinationPipeline:
-    """
-    直接对接 retrieval_results 的 pipeline。
-
-    输入 data 约定包括：
-    - extract_concept
-    - retrieval_results
-    - 可选 prompt / rewrite_prompt
-    """
     def __init__(
         self,
         lora_index_path: str,
@@ -839,10 +757,15 @@ class CombinationPipeline:
         lambda_quality: float = 0.8,
         overlap_weight: float = 0.7,
         emb_weight: float = 0.3,
+
+        route_text_ratio: float = 1.0,
+        task = "clipemb"
     ):
         self.device = device
-
-        self.clip_encoder = TextImageEncoder().to(device)
+        if task == "clipemb":
+            self.clip_encoder = TextImageEncoder(device=device).to(device)
+        else:
+            self.clip_encoder = QwenVLEncoder(device=device).to(device)
         self.clip_encoder.eval()
 
         self.index_store = LoRAIndexStore(
@@ -864,6 +787,7 @@ class CombinationPipeline:
             lambda_quality=lambda_quality,
             overlap_weight=overlap_weight,
             emb_weight=emb_weight,
+            route_text_ratio=route_text_ratio,
             device=device,
         )
 
@@ -878,13 +802,6 @@ class CombinationPipeline:
         data: Dict[str, Any],
         per_concept_top_k: Optional[int] = None,
     ):
-        """
-        把 retrieval_results 组织成:
-        - concept_names
-        - candidate_items
-        - concept_embs
-        - full_prompt_emb
-        """
         extract_concept = data["extract_concept"]
         retrieval_results = data["retrieval_results"]
 
@@ -897,7 +814,8 @@ class CombinationPipeline:
             for ec in extract_concept:
                 keyword = ec["keyword"]
                 desc = ec.get("retrieval_description", "")
-                parts.append(f"{keyword}. {desc}")
+                # parts.append(f"{keyword}. {desc}")
+                parts.append(f"{keyword}")
             full_prompt_text = " ".join(parts)
 
         full_prompt_emb = self.encode_text(full_prompt_text)
@@ -910,7 +828,7 @@ class CombinationPipeline:
             keyword = ec["keyword"]
             retrieval_description = ec.get("retrieval_description", "")
 
-            concept_query = f"a '{keyword}' adapter. " + retrieval_description
+            concept_query = f"{keyword}"
             concept_emb = self.encode_text(concept_query)
 
             concept_names.append(keyword)
@@ -923,14 +841,16 @@ class CombinationPipeline:
             cur_items = []
             for item in cur_candidates:
                 model_file = item["model_file"]
-                lora_emb = self.index_store.get_embedding(model_file)
-                if lora_emb is None:
+                lora_item = self.index_store.get_embedding(model_file)
+                if lora_item is None:
                     continue
 
                 cur_items.append({
                     "model_file": model_file,
-                    "retrieval_score": item.get("score", None),
-                    "embedding": lora_emb,
+                    "retrieval_score": item.get("retrieval_score", None),
+                    "txt_embedding": lora_item["txt_embedding"],
+                    "img_embedding": lora_item["img_embedding"],
+                    "is_dual": lora_item["is_dual"],
                 })
 
             candidate_items.append(cur_items)
@@ -970,6 +890,9 @@ class CombinationPipeline:
             reorder_concepts=reorder_concepts,
         )
 
+        if return_candidate_pool and "candidate_pool" in optimize_res:
+            self.analyze_candidate_pool(optimize_res["candidate_pool"])
+
         diverse_combinations = []
         for combo in optimize_res["diverse_results"]:
             diverse_combinations.append({
@@ -1004,6 +927,42 @@ class CombinationPipeline:
         data["combination_results"] = result_dict
         return data
 
+    
+
+    def analyze_candidate_pool(self, candidate_pool):
+        if not candidate_pool:
+            print("[CandidatePool] empty")
+            return
+
+        combo_len = len(candidate_pool[0]["items"])
+        pool_size = len(candidate_pool)
+
+        print(f"[CandidatePool] size={pool_size}, combo_len={combo_len}")
+
+        for pos in range(combo_len):
+            counter = Counter()
+            for combo in candidate_pool:
+                if pos < len(combo["items"]):
+                    mf = combo["items"][pos]["model_file"]
+                    counter[mf] += 1
+
+            uniq = len(counter)
+            most_common = counter.most_common(10)
+
+            print(f"[CandidatePool][Pos {pos}] unique={uniq}")
+            for mf, cnt in most_common:
+                print(f"    {mf}: {cnt} ({cnt / pool_size:.2%})")
+
+        # 组合整体唯一数
+        combo_counter = Counter()
+        for combo in candidate_pool:
+            key = tuple(item["model_file"] for item in combo["items"])
+            combo_counter[key] += 1
+
+        print(f"[CandidatePool] unique full combos={len(combo_counter)} / {pool_size}")
+        print("[CandidatePool] top repeated combos:")
+        for combo_key, cnt in combo_counter.most_common(10):
+            print(f"    {combo_key}: {cnt} ({cnt / pool_size:.2%})")
 
 # ==========================================================
 # 4. batch processing jsonl file
@@ -1035,8 +994,11 @@ def optimize_retrieval_results_file(
     overlap_weight: float = 0.7,
     emb_weight: float = 0.3,
 
+    route_text_ratio: float = 1.0,
+
     return_candidate_pool: bool = False,
     reorder_concepts: bool = True,
+    task="clipemb"
 ):
     pipeline = CombinationPipeline(
         lora_index_path=lora_index_path,
@@ -1054,6 +1016,8 @@ def optimize_retrieval_results_file(
         lambda_quality=lambda_quality,
         overlap_weight=overlap_weight,
         emb_weight=emb_weight,
+        route_text_ratio=route_text_ratio,
+        task=task,
     )
 
     with open(retrieval_result_path, "r", encoding="utf-8") as f:
@@ -1088,38 +1052,34 @@ def optimize_retrieval_results_file(
 # ==========================================================
 if __name__ == "__main__":
     optimize_retrieval_results_file(
-        retrieval_result_path="test_data/250_clipemb-7_all_res.jsonl",
-        lora_index_path="lora_index_clipemb-7_all.pt",
-        output_path="test_data/250_clipemb-7_all_res_combinations_reank_beam.jsonl",
+        retrieval_result_path="test_data/data_500_qwenemb_4-68.jsonl",
+        lora_index_path="lora_index/qwenemb_cosinsmoothl1_all_4-68.pt",
+        output_path="test_data/data_500_qwenemb_4-68_reank_beam.jsonl",
         device="cuda",
 
-        # retrieval 阶段每个 concept 先最多带多少候选进来
-        per_concept_top_k=100,
+        per_concept_top_k=50,
+        top_pool_size=500,
+        final_top_k=20,
 
-        # final 输出相关
-        top_pool_size=150,
-        final_top_k=8,
-
-        # scoring 权重
         alpha=1.0,
         beta_compat=0.3,
         eta_redund=0.4,
         delta=0.5,
 
-        lambda_concept=1.0,
-        lambda_prompt=0.3,
+        lambda_concept=1,
+        lambda_prompt=0.7,
         global_tau=0.2,
 
-        # beam search 超参
-        local_top_m=25,     # 每个 concept 预裁剪到多少
-        beam_width=200,     # 每一层 beam 保留多少 partial combos
-        final_pool_size=150,
+        local_top_m=80,
+        beam_width=400,
+        final_pool_size=500,
 
-        # diversified reranking
         lambda_quality=0.8,
-        overlap_weight=0.7,
-        emb_weight=0.3,
+        overlap_weight=0.6,
+        emb_weight=0.4,
 
-        return_candidate_pool=False,
+        route_text_ratio=0.85,   # dual-head 下 text/img route 融合比例
+        return_candidate_pool=True,
         reorder_concepts=True,
+        task='qwenemb'
     )
