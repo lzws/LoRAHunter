@@ -1,4 +1,9 @@
 import torch, os
+# env = os.environ.copy()
+# env["OMP_NUM_THREADS"] = "1"
+# env["MKL_NUM_THREADS"] = "1"
+# env["OPENBLAS_NUM_THREADS"] = "1"
+# env["NUMEXPR_NUM_THREADS"] = "1"
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from tqdm import tqdm
 from transformers import CLIPTokenizer, CLIPModel, get_cosine_schedule_with_warmup
@@ -255,9 +260,10 @@ class ModelLogger:
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--metadata_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_20k.jsonl')
+    parser.add_argument("--metadata_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_20k_prompt2.jsonl')
     parser.add_argument("--emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/Diffimage-SD-emb-qwen')
     parser.add_argument("--txt_emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/train_set_txtemb_10k')
+    parser.add_argument("--prompt_emb_path", type=str, required=False, default='/shark/zhiwen/LoRAHunter/train_set_prompt_emb_20k_2')
     parser.add_argument("--output_dir", type=str, required=False, default="models/lora_encode")
     parser.add_argument("--info", type=str, required=False, default=", 不用prompt训练，直接用lora emb 和diff_vec做对比学习, 8卡全局batch对比学习")
 
@@ -270,17 +276,17 @@ def parse_args():
     parser.add_argument("--block_type", type=str, required=False, default="block2") # block | block2
     parser.add_argument("--head_mode", type=str, required=False, default="dual")  # single | dual
     parser.add_argument("--pooling", type=str, required=False, default="cls_mean")   # cls | cls_mean
-    parser.add_argument("--lora_encoder_path", required=False, default=None)
+    parser.add_argument("--lora_encoder_path", required=False, default="/shark/zhiwen/LoRAHunter/sd_encoder/models/lora_encoder/qwenemb/train_sd_lora_dataset_20k/cosine_smoothl1_loss/6/lora_encoder-74.safetensors")
 
     # training setting
-    parser.add_argument("--task", type=str, default="qwenemb") # clipemb ｜ qwenemb  使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
+    parser.add_argument("--task", type=str, default="promptemb") # clipemb ｜ qwenemb promptemb 使用clip模型的embedding， 还是用 qwenvl embedding 模型进行训练loraencoder
     parser.add_argument("--torch_dtype", required=False, default="bf16") # bf16 | float
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--loss_type", type=str, default="contrastive_loss") # contrastive_loss | mse_loss | mse_raw_loss | smooth_l1_regression_loss | cosine_smoothl1_loss
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--loss_type", type=str, default="cosine_smoothl1_loss") # contrastive_loss | mse_loss | mse_raw_loss | smooth_l1_regression_loss | cosine_smoothl1_loss
     parser.add_argument("--lambda_img", type=float, default=1)
     parser.add_argument("--lambda_text", type=float, default=1)
 
@@ -305,6 +311,7 @@ def main():
         metadata_path=args.metadata_path,
         emb_path=args.emb_path,
         txt_emb_path=args.txt_emb_path,
+        prompt_emb_path=args.prompt_emb_path
     )
 
     dataloader = torch.utils.data.DataLoader(
@@ -483,3 +490,4 @@ if __name__ == "__main__":
     
 # nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7,8 --main_process_port=29501 train_3.py > zlog/train_clipemb/clipemb_dataset20k_contrastive_loss.log 2>&1 &
 # nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7,8 --main_process_port=29501 train_3.py > zlog/train_qwenemb/qwenemb_dataset20k_contrastive_loss_blocck2_dual_0.log 2>&1 &
+# nohup accelerate launch --num_processes 8 --gpu_ids 0,1,2,3,4,5,6,7,8 --main_process_port=29501 train_3.py > zlog/train_promptemb/promptemb_dataset20k_cosine_smoothl1_loss_blocck2_dual_0.log 2>&1 &

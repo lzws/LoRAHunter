@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3,4,5,6,7'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
 import time
 import torch
 from torch.utils.data import DataLoader
@@ -480,17 +480,17 @@ def find_train_not_in_index(
     
 
 if __name__ == "__main__":
-    # build_lora_index_multi_gpu(
-    #     lora_pool_metadata_file="/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
-    #     lora_base_path="/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1",
-    #     encoder_path="/shark/zhiwen/LoRAHunter/sd_encoder/models/lora_encoder/qwenemb/train_sd_lora_dataset_20k/cosine_smoothl1_loss/5/lora_encoder-199.safetensors",
-    #     save_path="qwenemb_cosinesmoothl1_all_5-199.pt",
-    #     batch_size=32,
-    #     num_workers=8,
-    #     dtype=torch.bfloat16,
-    #     num_gpus=4,
-    #     save_dir="lora_index_shards_clip",
-    # )
+    build_lora_index_multi_gpu(
+        lora_pool_metadata_file="/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
+        lora_base_path="/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1",
+        encoder_path="/shark/zhiwen/LoRAHunter/sd_encoder/models/lora_encoder/qwenemb/train_sd_lora_dataset_20k/contrastive_loss/0/lora_encoder-196.safetensors",
+        save_path="qwenemb_contrastive_all_0-196.pt",
+        batch_size=2,
+        num_workers=2,
+        dtype=torch.bfloat16,
+        num_gpus=4,
+        save_dir="lora_index_shards_clip",
+    )
 
     # split_lora_index(
     #     index_path="lora_index/qwenemb_cosinsmoothl1_all_5-199.pt",
@@ -505,5 +505,5 @@ if __name__ == "__main__":
     #     save_txt_path="missing_in_index.txt",
     #     save_json_path="missing_in_index.json",
     # )
-
-
+# nohup python build_index.py > zlog/build_index.log 2>&1 &
+# export TMPDIR=/shark/zhiwen/LoRAHunter/cache

@@ -6,16 +6,15 @@ import json, os
 # from diffsynth.utils.lora import GeneralLoRALoader
 # from diffsynth.core.loader import hash_model_file,convert_keys_dict_to_single_str,load_keys_dict
 from diffusers.loaders import StableDiffusionLoraLoaderMixin
-# 数据 按LoRA划分，每个LoRA一条数据
-# 每条数据包括 LoRA 权重、short_llm_description, diff_vec, prompt(随机5选1)
-# 
+import torch.distributed as dist
 
 
 class EmbSaver():
-    def __init__(self,emb_path='/shark/zhiwen/LoRAHunter/Diffimage-SD-emb', root_image_path='/shark/zhiwen/LoRAHunter/DiffImage_SD', txt_emb_path='/shark/zhiwen/LoRAHunter/train_set_txtemb_10k') -> None:
+    def __init__(self,emb_path='/shark/zhiwen/LoRAHunter/Diffimage-SD-emb', root_image_path='/shark/zhiwen/LoRAHunter/DiffImage_SD', txt_emb_path='/shark/zhiwen/LoRAHunter/train_set_txtemb_10k',prompt_emb_path="/shark/zhiwen/LoRAHunter/train_set_prompt_emb_20k") -> None:
         self.emb_path = emb_path
         self.root_image_path = root_image_path
         self.txt_emb_path = txt_emb_path
+        self.prompt_emb_path = prompt_emb_path
     
     def get_dir(self, model_id):
         dir_1 = str(model_id)[:2]
@@ -30,6 +29,24 @@ class EmbSaver():
         dir_1 = str(model_id)[:2]
         dir_2 = str(model_id)[2:4]
         return f'{self.txt_emb_path}/{dir_1}/{dir_2}/{str(model_id).replace("/", "__")}.pth'
+
+    def get_prompt_emb_path(self, model_id, pid):
+        dir_1 = str(model_id)[:2]
+        dir_2 = str(model_id)[2:4]
+        return f'{self.prompt_emb_path}/{dir_1}/{dir_2}/{str(model_id)}/{pid}.pth'
+
+    def save_prompt_emb(self, emb_dict, model_id, pid, save_path=None):
+        if save_path is None:
+            save_path = self.get_prompt_emb_path(model_id, pid)
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        torch.save(emb_dict,save_path)
+        print(f"save prompt emb to {save_path}")
+    
+    def load_prompt_emb(self, model_id, pid, device='cpu',file_path=None):
+        if file_path is None:
+            file_path = self.get_prompt_emb_path(model_id, pid)
+        emb_dict = torch.load(file_path, map_location=device, weights_only=True)
+        return emb_dict
 
     def save_emb_dict(self, emb_dict, model_id, save_path=None):
         if save_path is None:
@@ -165,15 +182,17 @@ class LoRADataset(torch.utils.data.Dataset):
         task='clipemb',
         metadata_path='/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset.jsonl',
         emb_path='',
-        txt_emb_path=''
+        txt_emb_path='',
+        prompt_emb_path='',
     ):
         self.base_path = base_path
         self.task = task
+        self.cache_path = '/shark/zhiwen/LoRAHunter/sd_lora/lora_cache_2'
 
         with open(metadata_path, 'r', encoding='utf-8') as f:
             self.datas = [json.loads(line) for line in f.readlines()]
 
-        self.emb_saver = EmbSaver(emb_path=emb_path, txt_emb_path=txt_emb_path)
+        self.emb_saver = EmbSaver(emb_path=emb_path, txt_emb_path=txt_emb_path,prompt_emb_path=prompt_emb_path)
         self.patterns = default_lora_patterns()
 
     def __len__(self):
@@ -186,14 +205,22 @@ class LoRADataset(torch.utils.data.Dataset):
         model_id = item['adapter_id']
         text = item['llm_description']
 
-        full_model_path = f'{self.base_path}/{model_file}'
 
+        # full_model_path = f'{self.base_path}/{model_file}'
+        cache_model_path = f'{self.cache_path}/{model_file.replace(".safetensors", ".pt")}'
         # load LoRA in dataloader stage
-        lora = StableDiffusionLoraLoaderMixin.lora_state_dict(full_model_path)[0]
+        # lora = StableDiffusionLoraLoaderMixin.lora_state_dict(full_model_path)[0]
+        try:
+            lora = torch.load(cache_model_path, map_location="cpu", weights_only=True)
+        except:
+            print(f"load lora from {cache_model_path} failed, model_file:{model_file}")
+            raise Exception("load lora from cache failed")
+        # lora = torch.load(cache_model_path, map_location="cpu", weights_only=True)
 
-        needed_keys = set(p["name"] + ".down.weight" for p in self.patterns) | \
-               set(p["name"] + ".up.weight" for p in self.patterns)
-        lora = {k: v for k, v in lora.items() if k in needed_keys}
+
+        # needed_keys = set(p["name"] + ".down.weight" for p in self.patterns) | \
+        #        set(p["name"] + ".up.weight" for p in self.patterns)
+        # lora = {k: v for k, v in lora.items() if k in needed_keys}
 
         # precomputed image diff vector
         diff_vec = self.emb_saver.load_vec(model_id)
@@ -205,11 +232,18 @@ class LoRADataset(torch.utils.data.Dataset):
             txtemb = self.emb_saver.load_txtemb(model_id)
             if txtemb.dim() == 2 and txtemb.size(0) == 1:
                 txtemb = txtemb.squeeze(0)
+        elif self.task == 'promptemb':
+            prompts = item['prompts']
+            pid = torch.randint(0, len(prompts), (1,)).item()
+            text = prompts[pid]
+            txtemb = self.emb_saver.load_prompt_emb(model_id=model_id,pid=pid)
+            if txtemb.dim() == 2 and txtemb.size(0) == 1:
+                txtemb = txtemb.squeeze(0)
         else:
             txtemb = torch.zeros(768)
         
         return {
-            "model_file": full_model_path,
+            "model_file": cache_model_path,
             "lora": lora,           # dict[str, tensor]
             "diff_vec": diff_vec,   # e.g. [1, 768]
             "lora_text": text,      # str

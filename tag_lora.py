@@ -78,7 +78,6 @@ def find_available_lora():
 
             model_id = f'{owner}/{model_name}'
             
-
             if not os.path.exists(metadata_path) or model_id in datas_4k_map:
                 continue
             with open(metadata_path, 'r') as f:
@@ -164,10 +163,9 @@ def llm_calling(prompt):
 
     text = (
         f'现在有一个图像生成模型 LoRA Adapter 的描述: {prompt}'
-        f'你要根据这些描述写5个合适的英文prompt，LoRA Adapter 应该能对这些prompt生效，提升用这些prompt生成图像效果。\n'
-        f'每句prompt长度适中，保证5句prompt具有多样性，描述不同的场景或画面，但是要保证和LoRA Adapter对应，能通过prompt检索到这个LoRA。\n'
-        f'只需要返回5行字符串，每行包含1条prompt'
-        
+        f'你要根据这些描述写10个合适的英文prompt，这个 LoRA Adapter 应该能对这些prompt生效，提升用这些prompt生成图像效果。\n'
+        f'每句prompt长度适中，保证10句prompt具有多样性，描述不同的场景或画面，但是要保证和LoRA Adapter对应，能通过prompt检索到这个LoRA。\n'
+        f'只需要返回10行字符串，每行包含1条prompt'
     )
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -201,8 +199,10 @@ def llm_calling(prompt):
         return None
 
 def use_llm_tag():
-    filename = 'Available_LoRA_carlos_tags2.jsonl'
-    with open('Available_LoRA_carlos_tags.jsonl', 'r', encoding='utf-8') as f:
+    # filename = 'Available_LoRA_carlos_tags2.jsonl'
+    infilename = 'source_files/Available_LoRA_4k-13k_tags2.jsonl'
+    outname = 'source_files/Available_LoRA_4k-13k_tags2_prompt.jsonl'
+    with open(infilename, 'r', encoding='utf-8') as f:
         datas = [json.loads(line) for line in f.readlines()]
     
     for data in datas[:]:
@@ -214,7 +214,7 @@ def use_llm_tag():
         if res is None:
             continue
         data['short_description'] = res
-        with open(filename, 'a', encoding='utf-8') as f:
+        with open(outname, 'a', encoding='utf-8') as f:
             json_str = json.dumps(data, ensure_ascii=False)
             f.write(json_str + '\n')
         
@@ -222,11 +222,13 @@ def use_llm_tag():
 def use_llm_prompt():
     filename = 'Available_LoRA_carlos_tags2_prompt.jsonl'
 
-    with open(filename, 'r', encoding='utf-8') as f:
-        exist_lora_list = [json.loads(line)['model_id'] for line in f.readlines()]
-    
+    filename = 'source_files/Available_LoRA_4k-13k_tags2_prompt.jsonl'
 
-    source_file = 'source_files/LoRA_QWEN_IMAGE_20_B_top_4000.jsonl'
+    # with open(filename, 'r', encoding='utf-8') as f:
+    #     exist_lora_list = [json.loads(line)['model_id'] for line in f.readlines()]
+    exist_lora_list=[]
+
+    source_file = 'source_files/Available_LoRA_all.jsonl'
     with open(source_file, 'r', encoding='utf-8') as f:
         source_datas = [json.loads(line) for line in f.readlines()]
         
@@ -235,9 +237,9 @@ def use_llm_prompt():
     sourcedata_by_id = {item["model_id"]: item for item in source_datas}
 
 
-    with open('Available_LoRA_carlos_tags2.jsonl', 'r', encoding='utf-8') as f:
+    with open('source_files/Available_LoRA_4k-13k_tags2.jsonl', 'r', encoding='utf-8') as f:
         datas = [json.loads(line) for line in f.readlines()]
-    for data in datas[:]:
+    for data in datas[237:]:
         llm_description = data['llm_description']
         model_id = data['model_id']
         if model_id in exist_lora_list:
@@ -245,14 +247,15 @@ def use_llm_prompt():
             continue
         source_data = sourcedata_by_id[model_id]
         title = source_data['title']
-        description = source_data['description']
-        trigger_words = source_data['trigger_words']
+        # description = source_data['description']
+        # trigger_words = source_data['trigger_words']
         prompt = (
-            f'title:{title} \nDescription: {description} \n'
-            f'TriggerWords: {trigger_words} \nLLM Description: {llm_description}'
+            f'title:{title} \n'
+            f'LLM Description: {llm_description}'
         )
         print("\n")
         print(f"============ {model_id} ================")
+        print(f"{title}, {llm_description}")
         res = llm_calling(prompt)
         if res is None:
             continue
@@ -262,11 +265,45 @@ def use_llm_prompt():
         with open(filename, 'a', encoding='utf-8') as f:
             json_str = json.dumps(data, ensure_ascii=False)
             f.write(json_str + '\n')
-        time.sleep(5)
+        time.sleep(2)
 
+
+def use_llm_prompt2():
+    filename = '/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_20k.jsonl'
+    outname = '/shark/zhiwen/LoRAHunter/sd_encoder/train_sd_lora_dataset_20k_prompt2.jsonl'
+    filename = 'source_files/Available_LoRA_4k-13k_tags2.jsonl'
+    outname = 'source_files/Available_LoRA_4k-13k_tags2_prompt.jsonl'
+    with open(filename, 'r', encoding='utf-8') as f:
+        datas = [json.loads(line) for line in f.readlines()]
+    
+    for data in datas[:]:
+        model_id = data['model_id']
+        llm_description = data['llm_description']
+        title = data['title']
+        # description = data['description']
+        # trigger_words = data['trigger_words']
+        prompt = (
+            f'title:{title} \n'
+            f'LLM Description: {llm_description}'
+        )
+        print("\n")
+        print(f"============ {model_id} ================")
+        print(f"{title}, {llm_description}")
+        res = llm_calling(prompt)
+        if res is None:
+            continue
+        res = res.split('\n')
+        print(len(res))
+        data['prompts'] = res
+        with open(outname, 'a', encoding='utf-8') as f:
+            json_str = json.dumps(data, ensure_ascii=False)
+            f.write(json_str + '\n')
+        
+        
 
 if __name__ == '__main__':
-    find_available_lora()
+    use_llm_prompt()
+    # find_available_lora()
     # use_llm_tag()
     prompt = 'This LoRA adapter emphasizes the generation of highly defined male torsos with exaggerated abdominal musculature, rendered in a photorealistic 3D style. It consistently enhances the visibility and definition of abdominal muscles, pectorals, and shoulder contours, producing a hyper-realistic, sculpted appearance that mimics digital 3D modeling or bodybuilding photography. The subject is typically a shirtless man, often shown from the chest down to the waist, with a focus on anatomical precision and lighting that accentuates muscle relief through shadows and highlights. The visual style leans toward realism with smooth skin texture, natural skin tone, and subtle details like visible veins or slight sheen, suggesting a fitness or body-positive aesthetic. Backgrounds are usually mundane indoor settings—such as bathrooms or dressing areas—with minimal detail, serving only to frame the torso without drawing attention away. Clothing elements, when present, are limited to low-rise underwear or briefs, often featuring branded elastic bands, which further emphasize the exposed midsection. The adapter appears to prioritize physical form over facial features or full-body context, making it best suited for generating images focused on muscular physique and body structure. The overall mood is clean, direct, and physically idealized, aligning with fitness or body enhancement themes'
     # prompt = "This LoRA adapter induces a flat, abstract visual style characterized by simplified geometric forms, uniform color fields, and minimal depth cues. It tends to transform subjects into stylized, two-dimensional representations with clean edges and solid color blocks, often eliminating texture, shading, and realistic lighting. The resulting images resemble digital illustrations or graphic designs, emphasizing clarity and form over naturalism. While the original prompts are unknown, the consistent output suggests a focus on abstract composition rather than specific subjects, with figures or objects reduced to essential shapes and placed against plain or gradient backgrounds. The most affected elements include overall structure, color distribution, and spatial relationships, which are flattened into a cohesive, minimalist aesthetic. The adapter appears to prioritize design coherence and visual simplicity, producing outputs that feel like modern digital art or interface graphics. There is no strong emphasis on particular subjects, poses, or environments—instead, the core effect lies in the stylistic transformation toward abstraction and uniformity."
@@ -279,4 +316,4 @@ if __name__ == '__main__':
     # print(tags.split(','))
     # use_llm_prompt()
 
-# nohup python tag_lora.py > log/tag_prompt_Available_LoRA_carlos_tags2.log 2>&1 &
+# nohup python tag_lora.py > zlog/tag_prompt_4k-3k.log 2>&1 &

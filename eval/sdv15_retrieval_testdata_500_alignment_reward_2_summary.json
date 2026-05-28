@@ -1,0 +1,11 @@
+{
+  "num_prompts": 500,
+  "global_mean_clip_cosine": 0.26450230873823166,
+  "global_mean_clipscore": 26.450230873823166,
+  "global_mean_pickscore": 0.22577888823151587,
+  "global_mean_imagereward": 0.4966292202310404,
+  "global_max_clip_cosine": 0.4228917062282562,
+  "global_max_clipscore": 42.28917062282562,
+  "global_max_pickscore": 0.2669755518436432,
+  "global_max_imagereward": 1.9925740957260132
+}

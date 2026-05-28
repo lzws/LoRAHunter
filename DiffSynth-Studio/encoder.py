@@ -1,70 +1,310 @@
 import torch
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
-from sklearn.metrics.pairwise import cosine_similarity
-import pandas as pd
 import torch.nn as nn
-import torch.nn.functional as F
+from safetensors.torch import load_file
+from diffusers.loaders import StableDiffusionLoraLoaderMixin
+from models import CLIPEncoderLayer
+from typing import Optional
+# SD 版本的 LoRA encoder
 
-# "openai/clip-vit-large-patch14"
-class TextImageEncoder(torch.nn.Module):
-    def __init__(self, model_name="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/clip-vit-large-patch14", dtype=torch.float):
+
+class LoRALayerBlock(torch.nn.Module):
+    def __init__(self, L, dim_in, num_probes=4, full_name=''):
         super().__init__()
-        # self.device = device
-        self.dtype = dtype
-        # self.model, self.preprocess = clip.load('ViT-L/14@336px', download_root=model_name, device=device)
-        print(f"load clip model from: {model_name}")
-        self.model = CLIPModel.from_pretrained(model_name).to(dtype=torch.float)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.x = torch.nn.Parameter(torch.randn(num_probes, dim_in) * 0.02)
+        self.out_proj = torch.nn.Linear(num_probes, L)
+        self.full_name = full_name
+
+    def forward(self, lora_A, lora_B):
+        if lora_A.dim() == 4:
+            lora_A = lora_A[:, :, 0, 0]
+            lora_B = lora_B[:, :, 0, 0]
+
+        # [P, d_in] @ [d_in, r] -> [P, r]
+        # [P, r] @ [r, d_out] -> [P, d_out]
+        x = self.x @ lora_A.T @ lora_B.T   # [P, d_out]
+
+        # project probe dimension P -> L
+        x = x.transpose(0, 1)              # [d_out, P]
+        x = self.out_proj(x)               # [d_out, L]
+        out = x.transpose(0, 1).unsqueeze(0)   # [1, L, d_out]
+
+        return out
+
+class LoRALayerBlock2(torch.nn.Module):
+    def __init__(self, L, dim_in, num_probes=4, full_name=''):
+        super().__init__()
+        self.x = torch.nn.Parameter(torch.randn(num_probes, dim_in) * 0.02)
+        self.out_proj = torch.nn.Linear(num_probes, L)
+        self.full_name = full_name
+
+        self.pre_norm = nn.LayerNorm(num_probes)
+        self.mlp = nn.Sequential(
+            nn.Linear(num_probes, num_probes * 4),
+            nn.GELU(),
+            nn.Linear(num_probes * 4, num_probes),
+        )
 
 
+    def forward(self, lora_A, lora_B):
+        if lora_A.dim() == 4:
+            lora_A = lora_A[:, :, 0, 0]
+            lora_B = lora_B[:, :, 0, 0]
 
-    @torch.no_grad()
-    def encoding_image(self,image_path=''):
-        image = Image.open(image_path)
-        image_input = self.processor(images=image, return_tensors="pt").to(self.model.device)
-        image_features = self.model.get_image_features(**image_input)
-        return image_features.pooler_output #[1,768]
+        # [P, d_in] @ [d_in, r] -> [P, r]
+        # [P, r] @ [r, d_out] -> [P, d_out]
+        x = self.x @ lora_A.T @ lora_B.T   # [P, d_out]
+
+        # project probe dimension P -> L
+        x = x.transpose(0, 1)              # [d_out, P]
+        x = x + self.mlp(self.pre_norm(x))
+        x = self.out_proj(x)               # [d_out, L]
+        out = x.transpose(0, 1).unsqueeze(0)   # [1, L, d_out]
+
+        return out
+
+
+block_map = {
+    "block": LoRALayerBlock,
+    "block2": LoRALayerBlock2
+}
+
+class LoRAEmbedder(torch.nn.Module):
+    def __init__(self, lora_patterns=None, L=1, out_dim=2048, num_probes=4,block_type="block"):
+        super().__init__()
+        if lora_patterns is None:
+            lora_patterns = self.default_lora_patterns()
+        self.L = L
+        self.num_probes = num_probes
+        self.block_type = block_type
+            
+        model_dict = {}
+        for lora_pattern in lora_patterns:
+            name, dim = lora_pattern["name"], lora_pattern["dim"][0]
+            model_dict[name.replace(".", "___")] = block_map[block_type](L, dim, num_probes,name)
+        self.model_dict = torch.nn.ModuleDict(model_dict)
+        
+        proj_dict = {}
+        for lora_pattern in lora_patterns:
+            layer_type, dim = lora_pattern["type"], lora_pattern["dim"][1]
+            if layer_type not in proj_dict:
+                proj_dict[layer_type.replace(".", "___")] = torch.nn.Linear(dim, out_dim)
+        self.proj_dict = torch.nn.ModuleDict(proj_dict)
+        
+        self.lora_patterns = lora_patterns
         
 
-    @torch.no_grad()
-    def encoding_text(self,text=''):
-        text_input = self.processor(text=text, return_tensors="pt", max_length=77, truncation=True, padding=True).to(self.model.device)
-        text_features = self.model.get_text_features(**text_input)
-        return text_features.pooler_output #[1, 768]
+    def default_lora_patterns(self):
+        lora_patterns = []
+        # lora_dict = {
+        #     "attn.add_k_proj": (3072, 3072), "attn.add_q_proj": (3072, 3072), "attn.add_v_proj": (3072, 3072), "attn.to_add_out": (3072, 3072),
+        #     "attn.to_k": (3072, 3072), "attn.to_out.0": (3072, 3072), "attn.to_q": (3072, 3072), "attn.to_v": (3072, 3072),
+        #     "img_mlp.net.2": (12288, 3072), "img_mod.1": (3072, 18432), "txt_mlp.net.2": (12288, 3072), "txt_mod.1": (3072, 18432),
+        # }
+        lora_dict = {
+            "attn.add_k_proj": (3072, 3072), "attn.add_q_proj": (3072, 3072), "attn.add_v_proj": (3072, 3072), "attn.to_add_out": (3072, 3072),
+            "attn.to_k": (3072, 3072), "attn.to_out.0": (3072, 3072), "attn.to_q": (3072, 3072), "attn.to_v": (3072, 3072),
+            "img_mlp.net.2": (12288, 3072), "txt_mlp.net.2": (12288, 3072)
+        }
+        # 如果只编码30层呢
+        for i in range(60):
+            for suffix in lora_dict:
+                lora_patterns.append({
+                    "name": f"transformer_blocks.{i}.{suffix}",
+                    "dim": lora_dict[suffix],
+                    "type": suffix,
+                })
+        return lora_patterns
+        
+    def forward(self, lora):
+        lora_emb = []
+        for lora_pattern in self.lora_patterns:
+            name, layer_type = lora_pattern["name"], lora_pattern["type"]
+            name_key = name.replace(".", "___")
+            type_key = layer_type.replace(".", "___")
+
+            A_key = name + ".lora_A.weight"
+            B_key = name + ".lora_B.weight"
+
+            if A_key in lora and B_key in lora:
+                lora_A = lora[A_key]
+                lora_B = lora[B_key]
+                lora_out = self.model_dict[name_key](lora_A, lora_B)
+                lora_out = self.proj_dict[type_key](lora_out)
+            else:
+                # missing layer -> zero token
+                print(f"missing layer: {name}, A_key: {A_key}")
+                proj = self.proj_dict[type_key]
+                zero_token = torch.zeros(
+                    1, self.L, proj.out_features,
+                    device=proj.weight.device,
+                    dtype=proj.weight.dtype
+                )
+                lora_out = zero_token
+
+            lora_emb.append(lora_out)
+
+        lora_emb = torch.concat(lora_emb, dim=1)
+        return lora_emb
 
 
 class LoRAEncoder(torch.nn.Module):
-    def __init__(self, model_name="", device='cuda:7'):
+    def __init__(self, embed_dim=768, max_position_embeddings=600, num_encoder_layers=4, encoder_intermediate_size=2560, L=1, num_probes=4, 
+                    block_type="block", head_mode="single", pooling="cls", out_dim=None, text_out_dim=None, img_out_dim=None):
         super().__init__()
-        self.device = device
+        max_position_embeddings *= L
+        self.head_mode = head_mode
+        self.pooling = pooling
+
+        self.cls_token = torch.nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+        
+        # Embedder
+        self.embedder = LoRAEmbedder(L=L, out_dim=embed_dim, num_probes=num_probes, block_type=block_type)
+
+        # position_embeds (This is a fixed tensor)
+        self.position_embeds = torch.nn.Parameter(torch.zeros(1, max_position_embeddings, embed_dim))
+
+        # encoders
+        self.encoders = torch.nn.ModuleList([CLIPEncoderLayer(embed_dim, encoder_intermediate_size) for _ in range(num_encoder_layers)])
+
+        # attn_mask
+        # self.attn_mask = self.attention_mask(max_position_embeddings)
+
+        # final_layer_norm
+        self.final_layer_norm = torch.nn.LayerNorm(embed_dim)
+        if pooling == "cls_mean":
+            self.pool_proj = nn.Sequential(
+                nn.LayerNorm(embed_dim * 2),
+                nn.Linear(embed_dim * 2, embed_dim),
+            )
+        else: 
+            self.pool_proj = nn.Identity()
+        
+        if head_mode == "single":
+            final_out_dim = out_dim if out_dim is not None else embed_dim
+            # self.out_proj = torch.nn.Linear(embed_dim, final_out_dim)
+            self.out_proj = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, final_out_dim),
+            )
+        elif head_mode == "dual":
+            text_out_dim = text_out_dim if text_out_dim is not None else embed_dim
+            img_out_dim = img_out_dim if img_out_dim is not None else embed_dim
+
+            self.text_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, text_out_dim),
+            )
+            self.img_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, img_out_dim),
+            )
+        else:
+            raise ValueError(f"head_mode {head_mode} is not supported")
+
+    def attention_mask(self, length):
+        mask = torch.empty(length, length)
+        mask.fill_(float("-inf"))
+        mask.triu_(1)
+        return mask
+
+    def encode_tokens(self, lora):
+        embeds = self.embedder(lora) 
+        embeds = embeds + self.position_embeds[:, :embeds.size(1), :]
+        # attn_mask = self.attn_mask.to(device=embeds.device, dtype=embeds.dtype)
+        cls_ = self.cls_token.expand(embeds.size(0), -1, -1)
+        embeds = torch.cat([cls_, embeds], dim=1)
+        for encoder_id, encoder in enumerate(self.encoders):
+            embeds = encoder(embeds, attn_mask=None)
+        embeds = self.final_layer_norm(embeds)
+        return embeds
+    
+    def pool_features(self, embeds):
+        if self.pooling == 'cls':
+            h = embeds[:, 0]
+        elif self.pooling == "cls_mean":
+            cls_feat = embeds[:, 0]
+            mean_feat = embeds[:, 1:].mean(dim=1)
+            h = self.pool_proj(torch.cat([cls_feat, mean_feat], dim=-1))
+        else:
+            raise ValueError(f"pooling {self.pooling} is not supported")
+        
+        return h
+
+    def encode_trunk(self, lora):
+        embeds = self.encode_tokens(lora)
+        h = self.pool_features(embeds)
+        return h
+
+    def forward(self, lora):
+        h = self.encode_trunk(lora)
+        if self.head_mode == "single":
+            return self.out_proj(h)
+        elif self.head_mode == "dual":
+            z_text = self.text_head(h)
+            z_img = self.img_head(h)
+            return z_text, z_img
+
+
+class PromptAdapter(nn.Module):
+    """
+    小投影层：适配 retrieval / reward-aware 空间
+    """
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: Optional[int] = None, residual: bool = True):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = out_dim * 2
+
+        self.residual = residual and (in_dim == out_dim)
+
+        self.net = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.net(x)
+        if self.residual:
+            y = y + x
+        return y
 
 
 
-            
-if __name__ == '__main__':
-    clip_encoder = TextImageEncoder()
-    text = 'This LoRA adapter focuses on generating images of male figures wearing school uniforms, particularly athletic-style tracksuits commonly associated with Chinese high schools. The clothing is consistently depicted with a structured design: short-sleeved zip-up jackets featuring color-blocked panels in blue, white, and navy, often with vertical stripes along the sleeves and side seams. Matching shorts and striped socks complete the ensemble. The garments appear to be made of lightweight, slightly shiny synthetic fabric, suggesting a sporty, functional material. The subject is typically positioned outdoors in natural settings such as school sports fields or campuses, with blurred greenery and distant buildings creating a soft, real-world backdrop. Lighting is bright and even, simulating daylight with natural shadows, contributing to a clean, realistic aesthetic. The adapter emphasizes the upper body and facial features, maintaining clear detail in the face and clothing while keeping the background softly out of focus. It appears to strengthen the visual presence of the subject, enhancing contrast and clarity in the figure relative to the surroundings. The overall mood is calm and youthful, evoking a sense of everyday student life. While the exact pose may vary, the composition tends to center on full-body or three-quarter views that highlight the uniform’s design and fit'
-    text = 'This LoRA adapter focuses on generating images of male figures wearing school uniforms, particularly athletic-style tracksuits commonly associated with Chinese high schools. The clothing is consistently depicted with a structured design: short-sleeved zip-up jackets featuring color-blocked panels in blue, white, and navy, often with vertical stripes along the sleeves and side seams. Matching shorts and striped socks complete the ensemble. The garments appear to be made of lightweight, slightly shiny synthetic fabric, suggesting a sporty, functional material. The overall mood is calm and youthful, evoking a sense of everyday student life. While the exact pose may vary, the composition tends to center on full-body or three-quarter views that highlight the uniform’s design and fit'
-    text = 'This LoRA induces a flat, abstract style with simplified geometric forms and uniform color fields. It transforms subjects into stylized 2D representations featuring clean edges and solid blocks, removing texture, shading, and realistic depth. Outputs resemble digital illustrations or graphic designs, prioritizing clarity and form over naturalism. Figures are reduced to essential shapes against plain backgrounds, creating a cohesive, minimalist aesthetic akin to modern interface graphics. The adapter focuses on stylistic abstraction and visual simplicity rather than specific subjects or environments.'
-    text_features = clip_encoder.encoding_text([text,text])
-
-    print(text_features.shape)
-
-    # print(text_features.last_hidden_state.shape)
-    # print(text_features.pooler_output.shape)
-
-    # t_emb = text_features.pooler_output
-    # image = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/DiffImage/Qwen/Animals/Hybrid Creatures/0/42.jpg'
-    # image_features = clip_encoder.encoding_image(image)
-    # print(image_features.last_hidden_state.shape)
-    # print(image_features.pooler_output.shape)
-    # i_emb = image_features.pooler_output
-
-    # t_emb = t_emb / t_emb.norm(dim=-1, keepdim=True)
-    # i_emb = i_emb / i_emb.norm(dim=-1, keepdim=True)
-    # similarity = (t_emb @ i_emb.T)
-    # print(similarity)
+def check_unet():
+    from diffusers import StableDiffusionPipeline
+    model_id = ""
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/models/AI-ModelScope/stable-diffusion-v1-5", 
+        torch_dtype=torch.float16
+    )
+    unet = pipe.unet
+    for name, module in unet.named_modules():
+        print(name)
 
 
+
+
+
+if __name__ == "__main__":
+
+    lora_path = "/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1/civitai-lora/69/6900.safetensors"
+    lora_path = "/shark/zhiwen/LoRAHunter/sd_lora/lzwecnu/civitai-lora-66k-70k/28/280276.safetensors"
+    # lora_path = "/shark/zhiwen/LoRAHunter/sd_lora/sd_lora_1/civitai-lora/10/10024.safetensors"
+
+    device = 'cuda:4'
+
+    lora_embedder = LoRAEncoder(embed_dim=768).to(device)
+    convert_dict = StableDiffusionLoraLoaderMixin.lora_state_dict(lora_path)[0]
+    convert_dict = {k:v.to(device) for k, v in convert_dict.items()}
+    lora_emb = lora_embedder(convert_dict)
+    print(lora_emb.shape)
+
+    # print(len(convert_dict[0]))
+    # for i ,(k, v) in enumerate(convert_dict[0].items()):
+    #     print(i, k, v.shape)
+    #     if i >10:
+    #         break
+    
+    # check_unet()
 

@@ -221,7 +221,7 @@ class LoRAEncoder(torch.nn.Module):
                 nn.LayerNorm(embed_dim * 2),
                 nn.Linear(embed_dim * 2, embed_dim),
             )
-        else:git 
+        else: 
             self.pool_proj = nn.Identity()
         
         if head_mode == "single":

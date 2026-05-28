@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from encoder import QwenVLEncoder
 import torch.nn.functional as F
+from tqdm import tqdm
 
 # "openai/clip-vit-large-patch14"
 class TextImageEncoder(torch.nn.Module):
@@ -51,9 +52,11 @@ class TextImageEncoder(torch.nn.Module):
 
 
 class EmbSaver():
-    def __init__(self,emb_path='Diffimage-SD-emb',root_image_path='Diffimage-SD') -> None:
+    def __init__(self,emb_path='Diffimage-SD-emb',root_image_path='Diffimage-SD',prompt_emb_path="",gcl_emb_path="") -> None:
         self.emb_path = emb_path
         self.root_image_path = root_image_path
+        self.prompt_emb_path = prompt_emb_path
+        self.gcl_emb_path = gcl_emb_path
     
     def get_dir(self, model_id):
         dir_1 = str(model_id)[:2]
@@ -64,6 +67,41 @@ class EmbSaver():
         return f'{self.get_dir(model_id)}/{str(model_id).replace("/", "__")}.pth'
     def get_vec_path(self, model_id):
         return f'{self.get_dir(model_id)}/{str(model_id).replace("/", "__")}_diffvec.pth'
+    
+    def get_prompt_emb_path(self, model_id, pid):
+        dir_1 = str(model_id)[:2]
+        dir_2 = str(model_id)[2:4]
+        return f'{self.prompt_emb_path}/{dir_1}/{dir_2}/{str(model_id)}/{pid}.pth'
+
+    def get_gcl_emb_path(self, iid):
+        dir_1 = str(iid)[:2]
+        return f'{self.gcl_emb_path}/{dir_1}/{iid}.pth'
+
+    def save_gcl_emb(self, emb_dict, iid, save_path=None):
+        if save_path is None:
+            save_path = self.get_gcl_emb_path(iid)
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        torch.save(emb_dict,save_path)
+        # print(f"save gcl emb to {save_path}")
+
+    def load_gcl_emb(self, iid, device='cpu',file_path=None):
+        if file_path is None:
+            file_path = self.get_gcl_emb_path(iid)
+        emb_dict = torch.load(file_path, map_location=device, weights_only=True)
+        return emb_dict
+
+    def save_prompt_emb(self, emb_dict, model_id, pid, save_path=None):
+        if save_path is None:
+            save_path = self.get_prompt_emb_path(model_id, pid)
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        torch.save(emb_dict,save_path)
+        print(f"save prompt emb to {save_path}")
+    
+    def load_prompt_emb(self, model_id, pid, device='cpu',file_path=None):
+        if file_path is None:
+            file_path = self.get_prompt_emb_path(model_id, pid)
+        emb_dict = torch.load(file_path, map_location=device, weights_only=True)
+        return emb_dict
 
     def save_emb_dict(self, emb_dict, model_id, save_path=None):
         if save_path is None:
@@ -416,7 +454,7 @@ def make_train_text_embs(metadapath="", batch_size=16):
 
     # 2. 加载模型
     encoder = QwenVLEncoder(device=device)
-    emb_saver = EmbSaver(emb_path='train_set_txtemb_10k', root_image_path='Diffimage-SD')
+    emb_saver = EmbSaver(emb_path='train_gcl_promptemb', root_image_path='Diffimage-SD')
 
     # 3. 开始分批处理
     for i in range(0, len(datas), batch_size):
@@ -431,7 +469,8 @@ def make_train_text_embs(metadapath="", batch_size=16):
             title = data['title']
             tags = data['tags']
             des = data['llm_description']
-            model_id = data['adapter_id']
+            # model_id = data['adapter_id']
+            model
 
             query_text = (
                 f"Convert Stable Diffusion finetuned adapter description into an embedding for search: "
@@ -448,6 +487,7 @@ def make_train_text_embs(metadapath="", batch_size=16):
         for j, model_id in enumerate(batch_ids):
             # 取出对应的 embedding 行，并增加一个维度 [1, 2048] 以符合 save_emb_dict 的预期
             single_emb = batch_embs[j:j+1] 
+            single_emb = single_emb.cpu().detach()
             emb_saver.save_emb_dict(single_emb, model_id)
 
         print(f"Processed batch {i//batch_size + 1}/{(len(datas)-1)//batch_size + 1}")
@@ -514,8 +554,6 @@ def make_diff_vec():
     # load base only once
     base_embs = emb_saver.load_emb_dict('SDv1-5')
     
-
-
     todo_model_ids = []
     for data in datas:
         model_id = data['adapter_id']
@@ -668,18 +706,96 @@ def make_carlos_difftxt_emb(device="cuda", save_path="carlos_difftxt_qwenemb.pt"
 
 
 
-    
+def make_train_prompts_embs(metadapath="",start=0,end=100,device='cuda'):
+    # device = 'cuda'
+
+    # 1. 加载数据
+    with open(metadapath, 'r') as f:
+        datas = [json.loads(line) for line in f.readlines()]
+    print(f'load {len(datas)} datas, start: {start}, end: {end}')
+    datas = datas[start:end]
+
+    # 2. 加载模型
+    encoder = QwenVLEncoder(device=device)
+    emb_saver = EmbSaver(prompt_emb_path='train_set_prompt_emb_20k_2', root_image_path='Diffimage-SD')
+
+    # 3. 开始分批处理
+    for i in tqdm(range(0, len(datas))):
+        # 切片获取当前批次
+        # batch_datas = datas[i : i + batch_size]
+
+        data = datas[i]
+        prompts = data['prompts']
+
+        model_id = data['adapter_id']
+
+        batch_embs = encoder.encoding_text(prompts) 
+
+        # 5. 逐个保存结果
+        for j in range(0, len(prompts)):
+            # 取出对应的 embedding 行，并增加一个维度 [1, 2048] 以符合 save_emb_dict 的预期
+            single_emb = batch_embs[j:j+1]
+            single_emb = single_emb.detach().cpu()
+            emb_saver.save_prompt_emb(single_emb, model_id, j)
+
+
+def make_train_gcl_embs(metadapath="", batch_size=16):
+    device = 'cuda'
+
+    # 1. 加载数据
+    with open(metadapath, 'r') as f:
+        datas = [json.loads(line) for line in f.readlines()]
+    print(f'load {len(datas)} datas')
+
+    # 2. 加载模型
+    encoder = QwenVLEncoder(device=device)
+    emb_saver = EmbSaver(gcl_emb_path='train_gcl_promptemb', root_image_path='Diffimage-SD')
+
+    # 3. 开始分批处理
+    for i in range(0, len(datas), batch_size):
+        # 切片获取当前批次
+        batch_datas = datas[i : i + batch_size]
+        
+        batch_texts = []
+        batch_ids = []
+
+        # 构造当前批次的文本列表和 ID 列表
+        for data in batch_datas:
+            prompt = str(data['prompt'])
+            iid = data['iid']
+
+
+            batch_texts.append(prompt)
+            batch_ids.append(iid)
+
+        # 4. 批量推理 [batch_size, 2048]
+        # 确保你的 encoding_text 方法支持传入 List[str]
+        batch_embs = encoder.encoding_text(batch_texts) 
+
+        # 5. 逐个保存结果
+        for j, model_id in enumerate(batch_ids):
+            # 取出对应的 embedding 行，并增加一个维度 [1, 2048] 以符合 save_emb_dict 的预期
+            single_emb = batch_embs[j:j+1] 
+            single_emb = single_emb.cpu().detach()
+            emb_saver.save_gcl_emb(single_emb, model_id)
+
+        print(f"Processed batch {i//batch_size + 1}/{(len(datas)-1)//batch_size + 1}")
+
+
+
 
 if __name__ == '__main__':
     # main(1)
     # make_train_text_embs(metadapath="SD_adapter_metadata/train_lora_10k.jsonl", batch_size=32)
     # make_diff_vec_parallel()
-    make_carlos_difftxt_emb()
+    # make_carlos_difftxt_emb()
+    num = 7
+    device = f"cuda:{num}"
+    start = 0 + num * 2500
+    end =  start + 2500
+    # make_train_prompts_embs(metadapath="sd_encoder/train_sd_lora_dataset_20k_prompt2.jsonl", start=start, end=end, device=device)
+    make_train_gcl_embs(metadapath="/shark/zhiwen/LoRAHunter/rank_encoder/train_dataset/diffusion_db2_candidates.jsonl", batch_size=32)
     
-    
-
-
-    
-# nohup python DiffimageEmb.py > zlog/diffimage_emb_SD_2-5100-5500-0.log 2>&1 &
+# nohup python DiffimageEmb.py > zlog/diffimage_prompt_emb_7.log 2>&1 &
 
 

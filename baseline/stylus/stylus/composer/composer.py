@@ -15,7 +15,7 @@ from openai import OpenAI
 
 # Template strings for Composer prompts.
 ADAPTER_CATALOG = """\
-Index: {adapter_idx}
+name: {adapter_idx}
 Title: {adapter_title}
 Tags: {adapter_tags}
 Description: {adapter_description}
@@ -56,7 +56,7 @@ The output format should be in json format with the following keys and values:
 ```
 {{
 \"[topic_name]\": {{
-\"[adapter index]\": \"[Describe the adapter's primary function. Then describe how this function directly matches the topic name and the context of the prompt. Do not hallucinate. If it IS NOT A PERFECT MATCH, DO NOT CHOOSE THE ADAPTER. DO NOT ACCEPT ADAPTERS THAT ARE SIMILAR TO THE TOPIC OR COULD INDIRECTLY IMPACT THE TOPIC OR THAT MIGHT CONTAIN THE TOPIC. Output at most two style LoRAs for the entire output. Then, give a strong reason how the adapter's primary purpose can improve the image generation quality for the prompt.]\",
+\"[adapter name]\": \"[Describe the adapter's primary function. Then describe how this function directly matches the topic name and the context of the prompt. Do not hallucinate. If it IS NOT A PERFECT MATCH, DO NOT CHOOSE THE ADAPTER. DO NOT ACCEPT ADAPTERS THAT ARE SIMILAR TO THE TOPIC OR COULD INDIRECTLY IMPACT THE TOPIC OR THAT MIGHT CONTAIN THE TOPIC. Output at most two style LoRAs for the entire output. Then, give a strong reason how the adapter's primary purpose can improve the image generation quality for the prompt.]\",
 ...
 }},
 ...
@@ -68,12 +68,12 @@ For example, the prompt "James bond covered in blood in Russia" with topics, "Ja
 {{
     \"James bond\":
     {{
-        \"72\": \"The adapter 'Sean Connery` is about an actor who played James Bond in the 1960s. It matches the topic James Bond. This adapter provides crisper images of Sean Connery to better represent James Bond.\",
-        \"81\": \"The adapter 'Daniel Craig` is about an actor who played James Bond in the 2000s. It matches the topic James Bond. This adapter provides crisper images of Daniel Craig to better represent James Bond.\",
+        \"Sean__Connery\": \"The adapter 'Sean Connery` is about an actor who played James Bond in the 1960s. It matches the topic James Bond. This adapter provides crisper images of Sean Connery to better represent James Bond.\",
+        \"Daniel__Craig\": \"The adapter 'Daniel Craig` is about an actor who played James Bond in the 2000s. It matches the topic James Bond. This adapter provides crisper images of Daniel Craig to better represent James Bond.\",
     }},
     \"blood\":
     {{
-        \"90\": \"The adapter 'blood splatter` is about the style of blood splatter. Blood splatters can increase the detail of blood depicted on James Bond's body\".
+        \"blood__splatter\": \"The adapter 'blood splatter` is about the style of blood splatter. Blood splatters can increase the detail of blood depicted on James Bond's body\".
     }},
     \"Russia\": {{}},
 }}
@@ -82,12 +82,12 @@ Another example, for the prompt "a black t-shirt with the peace sign on it", the
 {{
     \"t-shirt\":
     {{
-        \"9\": \"This adapter 'T-shirt design' is trained on a dataset of t-shirt designs and can generate new t-shirt designs. This can improve the image generation quality by providing a variety of t-shirt designs.\",
-        \"62\": \"This adapter 'T-shirt' is trained on a dataset of t-shirts and can generate new t-shirts. This can improve the image generation quality by generating a wider set of t-shirts.\",
+        \"T-shirt__design\": \"This adapter 'T-shirt design' is trained on a dataset of t-shirt designs and can generate new t-shirt designs. This can improve the image generation quality by providing a variety of t-shirt designs.\",
+        \"new__t-shirts\": \"This adapter 'T-shirt' is trained on a dataset of t-shirts and can generate new t-shirts. This can improve the image generation quality by generating a wider set of t-shirts.\",
     }},
     \"peace sign\":
     {{
-        \"127\": \"This adaper is about the peace sign logo, which can be pasted onto t-shirts. This will provide a clearer image of a peace sign, improving image generation.\",
+        \"sign__logo\": \"This adaper is about the peace sign logo, which can be pasted onto t-shirts. This will provide a clearer image of a peace sign, improving image generation.\",
     }},
     \"black\": {{}},
 }}
@@ -181,10 +181,10 @@ def generate_adapters_catalog(adapters: List):
         # else:
         #     adapter_description = adapter.description[:1000] if adapter.description else 'None'
         
-        adapter_catalog_str += ADAPTER_CATALOG.format(adapter_idx=adapter['adapter_id'],
+        adapter_catalog_str += ADAPTER_CATALOG.format(adapter_idx=adapter['model_id'].replace("/","__"),
                                                         adapter_title=adapter['title'],
                                                         adapter_tags=adapter['tags'],
-                                                        adapter_description=adapter['llm_description'])
+                                                        adapter_description=adapter['llm_description'][:1000])
     return adapter_catalog_str
 
 def convert_response_str_to_dict(response_str: str):
@@ -252,29 +252,36 @@ if __name__ == '__main__':
     prompt = "A man riding a skateboard down a side walk."
     # metadata_file = '/shark/zhiwen/LoRAHunter/sd_encoder/retrieval_testdata_100_calllora_totalpool_clip.jsonl'
     test_data_path = '/shark/zhiwen/LoRAHunter/sd_encoder/test_data/retrieval_testdata_500_calllora_totalpool_clip.jsonl'
+    test_data_path = "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/test_data/stylus_500_calllora_totalpool_qwen.jsonl"
+    test_data_path = "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/test_data/diffusiondb_test_200_calllora_totalpool_qwen.jsonl"
+
+    res_path = "/shark/zhiwen/LoRAHunter/DiffSynth-Studio/test_data/stylus_db200_calllora_composer.jsonl"
+
     with open(test_data_path, 'r') as f:
         test_datas = [json.loads(line) for line in f.readlines()]
     
-    lora_metadata_path = '/shark/zhiwen/LoRAHunter/SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl'
+    lora_metadata_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/rank_dataset/Available_LoRA_all.jsonl'
     with open(lora_metadata_path, 'r') as f:
         lora_metadatas = [json.loads(line) for line in f.readlines()]
 
     lora_metadatas_map = {one['model_file']: one for one in lora_metadatas}
 
     # adapters = compute_rankings(prompt=prompt, top_k=200, policy='rank')
-    for data in test_datas[318:]:
+    for data in test_datas[:]:
         prompt = data['prompt']
         retrieval_results = data['retrieval_results']
         res = retrieval_results[prompt]
         adapters = [lora_metadatas_map[one['model_file']] for one in res]
         try:
-            adapter_concepts_dict = compose(prompt, adapters[:100])
+            adapter_concepts_dict = compose(prompt, adapters[:75])
             # print(adapter_concepts_dict)
             data['rerank_results'] = adapter_concepts_dict
-            with open('testdata_500_totalpool_stylus.jsonl', 'a') as f:
+            with open(res_path, 'a') as f:
                 f.write(json.dumps(data)+'\n')
         except Exception as e:
             print(f"error: {str(e)}")
             data['rerank_results'] = {}
-            with open('testdata_500_totalpool_stylus.jsonl', 'a') as f:
+            with open(res_path, 'a') as f:
                 f.write(json.dumps(data)+'\n')
+
+# nohup python composer.py > call_lora_stylus.log 2>&1 &

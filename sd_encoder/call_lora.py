@@ -714,23 +714,24 @@ def call_lora_one(
 
 if __name__ == "__main__":
     index_paths = ["lora_index/qwenemb_cosinsmoothl1_all_5-199.pt", "lora_index/clipemb_contastive_all_2-1248.pt"]
-    call_lora(
-        index_path=index_paths[0],
-        metadata_path="../SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
-        test_data_path="test_data/retrieval_testdata_500_extract_2.jsonl",
-        output_path="test_data/data_500_qwenemb_5-199_2.jsonl",
-        device="cuda",
-        mode="hybrid",   # dense / bm25 / hybrid
-        top_k=40,
-        alpha=0.75,
-        dense_text_ratio=0.85,
-        task="qwenemb",
-        use_subject_contrast=False,
-        purity_weight_dense=0,
-        purity_weight_hybrid=0,
-    )
+    # call_lora(
+    #     index_path=index_paths[0],
+    #     metadata_path="../SD_adapter_metadata/sd_lora_1/exist_file_adapters.jsonl",
+    #     test_data_path="test_data/retrieval_testdata_500_extract_2.jsonl",
+    #     output_path="test_data/data_500_qwenemb_5-199_2.jsonl",
+    #     device="cuda",
+    #     mode="hybrid",   # dense / bm25 / hybrid
+    #     top_k=40,
+    #     alpha=0.75,
+    #     dense_text_ratio=0.85,
+    #     task="qwenemb",
+    #     use_subject_contrast=False,
+    #     purity_weight_dense=0,
+    #     purity_weight_hybrid=0,
+    # )
 
     index_path = "/shark/zhiwen/LoRAHunter/sd_encoder/lora_index/qwenemb_cosinsmoothl1_all_5-199.pt"
+    index_path = "qwenemb_contrastive_all_0-196.pt"
     # index_path = "/shark/zhiwen/LoRAHunter/sd_encoder/lora_index/clipemb_contastive_all_2-1248.pt"
     task = 'qwenemb'
     query = "A koi fish in watercolor style"
@@ -758,15 +759,16 @@ if __name__ == "__main__":
     query_text = "children,This LoRA generates groups of young human subjects with varied expressions and casual clothing. It features natural skin textures, appropriate scaling for passengers, and dynamic poses suitable for riding. The aesthetic focuses on the demographics of kids in a fun setting without emphasizing specific individual identities"
     query_text = "men in cloaks, This adapter should generate male figures wearing long, flowing cloaks. Focus on the fabric texture, drape, and silhouette of the cloaks over the human form. Avoid specific fantasy classes like wizards unless specified, keeping it grounded in the clothing item itself."
     query_text = "skateboards, realistic skateboards. Focus on the deck graphics, wheel structure, and truck hardware. The object should be distinct and detailed, suitable for being ridden or held."
-    query_text = "man, realistic human male subjects with natural skin textures and anatomical proportions. It focuses on facial features and general body structure suitable for standing poses. Best for central characters in various lighting conditions, emphasizing human presence without specific costume constraints."
+    # query_text = "man, realistic human male subjects with natural skin textures and anatomical proportions. It focuses on facial features and general body structure suitable for standing poses. Best for central characters in various lighting conditions, emphasizing human presence without specific costume constraints."
    
-    query_text = "hrow hug, This LoRA generates detailed throw rugs with various weaving patterns, soft fabric textures, and decorative fringe. It features intricate design motifs, rich colors, and realistic textile fibers. The style is photorealistic with soft lighting emphasizing the rug's texture. Best for interior shots where the rug is the central subject, focusing on material quality without surrounding furniture."
+    # query_text = "hrow hug, This LoRA generates detailed throw rugs with various weaving patterns, soft fabric textures, and decorative fringe. It features intricate design motifs, rich colors, and realistic textile fibers. The style is photorealistic with soft lighting emphasizing the rug's texture. Best for interior shots where the rug is the central subject, focusing on material quality without surrounding furniture."
     # query_text = "watercolor style"
     # query_text = "snow, white snow-covered surfaces with soft textures and cold lighting effects. It features particle details, ground coverage, and winter atmospheric tones. The style emphasizes terrain texture and environmental mood, suitable for grounding subjects in a winter setting"
     # query_text = "white tent, This adapter generates realistic white tents, emphasizing fabric textures, structural poles, and canopy shapes. It features clean white surfaces, potential shading details, and beach or camping contexts. The style is photorealistic with natural lighting, focusing on the tent's material and form as the central subject."
     # query_text = "crossroads sign, Retrieve an adapter focused on road infrastructure signage, specifically crossroads or intersection signs. The adapter should generate clear signboards with typical traffic colors and symbols mounted on poles, prioritizing the sign's visual details over the surrounding environment"
-    query_text = "vector illustration, vector art styles, featuring clean paths, solid colors, minimal shading, and graphic design aesthetics suitable for illustrations"
-    query_text = "award, This adapter generates objects representing recognition, such as trophies, medals, or certificates. Focus on materials like gold, silver, or glass, with detailed engravings or ribbons. The object should be clearly visible as a symbol of achievement."
-    # call_lora_one(query=query_text, index_path=index_path, task=task, alpha=0.85, dense_text_ratio=0.8,use_subject_contrast=False,negative_weight=0.5,purity_weight_hybrid=0)
+    # query_text = "vector illustration, vector art styles, featuring clean paths, solid colors, minimal shading, and graphic design aesthetics suitable for illustrations"
+    # query_text = "award, This adapter generates objects representing recognition, such as trophies, medals, or certificates. Focus on materials like gold, silver, or glass, with detailed engravings or ribbons. The object should be clearly visible as a symbol of achievement."
+    query_text = "sidewalk"
+    call_lora_one(query=query_text, index_path=index_path, task=task, alpha=0.85, dense_text_ratio=0.7,use_subject_contrast=False,negative_weight=0.5,purity_weight_hybrid=0)
 
 # nohup python call_lora.py > build_lora_index_qwen.log 2>&1 &

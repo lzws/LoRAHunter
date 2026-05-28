@@ -1,13 +1,15 @@
 import os,json
 
-from encoder import TextImageEncoder
+from models import TextImageEncoder, QwenVLEncoder
+from diffsynth.core import load_state_dict
+
 import torch
 root_image_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/DiffImage-2'
 
 class EmbSaver():
-    def __init__(self) -> None:
-        self.emb_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/Diffimage-2-emb'
-        self.root_image_path = '/shark/zhiwen/LoRAHunter/DiffSynth-Studio/DiffImage-2'
+    def __init__(self,emb_path,root_image_path) -> None:
+        self.emb_path = emb_path
+        self.root_image_path = root_image_path
     
     def save_emb_dict(self, emb_dict, model_id, save_path=None):
         if save_path is None:
@@ -110,16 +112,69 @@ def coco_prompts():
 
 
 
+def make_train_text_embs(metadapath="", batch_size=16):
+    device = 'cuda'
+
+    # 1. 加载数据
+    with open(metadapath, 'r') as f:
+        datas = [json.loads(line) for line in f.readlines()]
+    print(f'load {len(datas)} datas')
+
+    # 2. 加载模型
+    encoder = QwenVLEncoder(device=device)
+    emb_saver = EmbSaver(emb_path='train_qwenlora_text_emb_title_des', root_image_path='Diffimage-SD')
+
+    # 3. 开始分批处理
+    for i in range(0, len(datas), batch_size):
+        # 切片获取当前批次
+        batch_datas = datas[i : i + batch_size]
+        
+        batch_texts = []
+        batch_ids = []
+
+        # 构造当前批次的文本列表和 ID 列表
+        for data in batch_datas:
+            title = data['title']
+            tags = data['tags']
+            des = data['short_description']
+
+            model_file = data['model_file']
+            model_id = model_file.split("/")[:2]
+            model_id = "__".join(model_id)
+            
+
+            query_text = (
+                f"Convert Stable Diffusion finetuned adapter description into an embedding for search: "
+                f"Title: {title}; Description: {des}; Tags:{tags}"
+            )
+            batch_texts.append(query_text)
+            batch_ids.append(model_id)
+
+        # 4. 批量推理 [batch_size, 2048]
+        # 确保你的 encoding_text 方法支持传入 List[str]
+        batch_embs = encoder.encoding_text(batch_texts) 
+
+        # 5. 逐个保存结果
+        for j, model_id in enumerate(batch_ids):
+            # 取出对应的 embedding 行，并增加一个维度 [1, 2048] 以符合 save_emb_dict 的预期
+            single_emb = batch_embs[j:j+1] 
+            single_emb = single_emb.cpu().detach()
+            emb_saver.save_emb_dict(single_emb, model_id)
+
+        print(f"Processed batch {i//batch_size + 1}/{(len(datas)-1)//batch_size + 1}")
+
+
 if __name__ == '__main__':
+    make_train_text_embs(metadapath="/shark/zhiwen/LoRAHunter/DiffSynth-Studio/rank_dataset/train_rank_lora_all_filtered.jsonl")
     # text_image_encoder = TextImageEncoder(device='cuda:4')
     # print('text_image_encoder loaded')
-    lora_id = 'qiyuanai/Qwen-Image_Cyberpunk-Style_Style-Material-Master-Series'
-    with open('/shark/zhiwen/LoRAHunter/train_mini_datas.jsonl','r') as f:
-        datas = [json.loads(line) for line in f.readlines()]
+    # lora_id = 'qiyuanai/Qwen-Image_Cyberpunk-Style_Style-Material-Master-Series'
+    # with open('/shark/zhiwen/LoRAHunter/train_mini_datas.jsonl','r') as f:
+    #     datas = [json.loads(line) for line in f.readlines()]
 
-    text_image_encoder = TextImageEncoder(device='cuda:4')
-    print('text_image_encoder loaded')
-    for data in datas:
-        get_diff_vec(model_id=data['model_id'])
+    # text_image_encoder = TextImageEncoder(device='cuda:4')
+    # print('text_image_encoder loaded')
+    # for data in datas:
+    #     get_diff_vec(model_id=data['model_id'])
     # load_emb(model_id='Qwen')
     # test_diff_vec(lora_id)

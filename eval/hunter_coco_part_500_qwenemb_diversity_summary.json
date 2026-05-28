@@ -1,0 +1,6 @@
+{
+  "num_prompts": 500,
+  "global_mean_tce": 2.301555064201355,
+  "global_mean_tie": 1.2573805766161532,
+  "global_mean_i2i": 0.774514147826698
+}
