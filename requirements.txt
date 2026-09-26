@@ -1,0 +1,5 @@
+torch>=2.1
+transformers>=4.40
+accelerate>=0.28
+safetensors>=0.4
+diffusers>=0.27
